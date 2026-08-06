@@ -4,182 +4,304 @@ import pathlib
 import argparse
 import json
 import math
-import requests
-import traceback
 import time
 import yfinance as yf
-from urllib.parse import urlencode
+import pandas as pd
 from datetime import datetime, timedelta
 
-
-afscreener_url = os.environ.get(
-    "AF_URL", "")
-afscreener_token = os.environ.get("AF_TOKEN", "")
-DELAY_TIME_SEC = 1
-RETRY_FAILED_DELAY = 20
+DELAY_TIME_SEC = 0.5
+RETRY_FAILED_DELAY = 10
 RETRY_CNT = 3
+
+# Sector/Industry name -> index maps, mirroring StockSectorDict/StockIndustryDict
+# in the front-end (src/common/stockdef.js). Unknown names fall back to "-1".
+SECTOR_INDEX = {
+    "Technology": "0",
+    "Industrials": "1",
+    "Financial Services": "2",
+    "Consumer Cyclical": "3",
+    "Communication Services": "4",
+    "Healthcare": "5",
+    "Real Estate": "6",
+    "Basic Materials": "7",
+    "Consumer Defensive": "8",
+    "Utilities": "9",
+    "Energy": "10",
+}
+
+INDUSTRY_INDEX = {}
+
+
+def load_industry_index():
+    """Build industry name -> index map from the front-end StockIndustryDict."""
+    global INDUSTRY_INDEX
+    root = pathlib.Path(__file__).parent.resolve()
+    stockdef_path = root / ".." / ".." / "src" / "common" / "stockdef.js"
+    try:
+        content = stockdef_path.read_text(encoding="utf-8")
+        start = content.find("StockIndustryDict")
+        if start == -1:
+            return
+        brace = content.find("{", start)
+        if brace == -1:
+            return
+        # crude but effective: extract "key": "Name" pairs
+        import re
+        pairs = re.findall(r'"(\d+)"\s*:\s*"([^"]+)"', content[brace:])
+        for key, name in pairs:
+            INDUSTRY_INDEX[name] = key
+    except Exception as ex:
+        print("load_industry_index failed: {ex}".format(ex=ex))
 
 
 def is_float(value):
     try:
         float(value)
         return True
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
 
-def send_request(url, headers):
-    for r in range(RETRY_CNT):
-        try:
-            res = requests.get(url, headers=headers)
-            res.raise_for_status()
-        except Exception as ex:
-            print('Generated an exception: {ex}'.format(ex=ex))
-
-        if res.status_code == 200:
-            return 0, res.text
-
-        time.sleep(RETRY_FAILED_DELAY)
-
-    return -2, "exceed retry cnt"
+def fmt_num(v):
+    if v is None:
+        return "-"
+    try:
+        f = float(v)
+    except (ValueError, TypeError):
+        return "-"
+    if math.isnan(f) or math.isinf(f):
+        return "-"
+    return f
 
 
-def send_post_json(url, req_data):
-    for r in range(RETRY_CNT):
-        try:
-            headers = {'content-type': 'application/json'}
-            res = requests.post(url, req_data, headers=headers)
-            res.raise_for_status()
-        except Exception as ex:
-            print('Generated an exception: {ex}'.format(ex=ex))
-
-        if res.status_code == 200:
-            return 0, res.json()
-
-        time.sleep(RETRY_FAILED_DELAY)
-
-    return -2, {}
+def pct_decimal(v):
+    """Convert a raw yfinance value to a decimal fraction (e.g. 0.2133 for 21.33%).
+    yfinance info returns ratios like 0.2133 already; keep them as-is. If it came
+    back oddly large (>1 for a percentage we expect <1, or >10 for a ratio) still
+    pass through and let the front-end interpret."""
+    return fmt_num(v)
 
 
-def get_stock_info():
-    param = {
-        'code': afscreener_token,
-        'api': 'get-stock-info-from-db'
-    }
-    encoded_args = urlencode(param)
-    query_url = afscreener_url + '?' + encoded_args
+def get_stock_universe():
+    """Return the list of US stock symbols to scan.
+    Priority: CLI arg -> env var -> S&P500 (curated, fast for CI)."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "-input-symbol-list", dest="input", default="")
+    args, _ = parser.parse_known_args()
+    if args.input:
+        return [s.strip() for s in args.input.split(",") if s.strip()]
 
-    for retry_i in range(RETRY_CNT):
-        try:
-            ret, content = send_request(query_url, {})
-            if ret == 0:
-                resp = json.loads(content)
-                if resp["ret"] == 0:
-                    return resp["data"]
-                else:
-                    print('server err = {err}, msg = {msg}'.format(err=resp["ret"], msg=resp["err_msg"]))
-            else:
-                print('send_request failed: {ret}'.format(ret=ret))
-
-        except Exception:
-            print('Generated an exception: {ex}, try next target.'.format(ex=traceback.format_exc()))
-
-        time.sleep(DELAY_TIME_SEC)
-
-    sys.exit(1)
-
-
-"""
-# marketwatch.com already add bot detection
-def get_stock_1y_data_from_marketwatch(symbol):
-    now = datetime.now()
-    one_year_ago = now - timedelta(days=365)
-    end_date = now.strftime("%m/%d/%Y") + "%20" + now.strftime("%H:%M:%S")
-    start_date = one_year_ago.strftime("%m/%d/%Y") + "%20" + one_year_ago.strftime("%H:%M:%S")
-    query_url = "https://www.marketwatch.com/investing/stock/" + symbol + "/downloaddatapartial?startdate=" + start_date + "&enddate=" + end_date + "&daterange=d30&frequency=p1d&csvdownload=true&downloadpartial=false&newdates=false"
+    env_list = os.environ.get("STOCK_SYMBOLS", "")
+    if env_list:
+        return [s.strip() for s in env_list.split(",") if s.strip()]
 
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3',
-            'Referer': 'https://www.marketwatch.com/',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Encoding': 'gzip, deflate',
-            'Accept-Language': 'en-US,en;q=0.8',
-        }
-        ret, content = send_request(query_url, headers)
-        if ret == 0:
-            # print(content)
-            lines = content.splitlines()
-            read_csv = csv.reader(lines)
-            headers = next(read_csv)
-            output = []
-            for row in read_csv:
-                d = {}
-                for i in range(len(headers)):
-                    v = row[i].replace(',', '')  # 2,134 -> 2134
-                    if is_float(v):
-                        v = float(v)
-                    d[headers[i]] = v
-                output.append(d)
-
-            return output
-        else:
-            print('send_request failed: {ret}'.format(ret=ret))
-
+        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        symbols = sp500["Symbol"].tolist()
+        print("using S&P500 universe: {n} symbols".format(n=len(symbols)))
+        return symbols
     except Exception as ex:
-        print('Generated an exception: {ex}'.format(ex=ex))
+        print("fallback to wikipedia sp500 failed: {ex}".format(ex=ex))
+        return []
 
-    return None
-"""
 
 def get_stock_1y_data_from_yahoo(symbol):
     try:
         stock = yf.Ticker(symbol)
         hist = stock.history(period="1y")
-        # convert to [{"Date":"03/05/2024","Open":143.0,"High":146.4,"Low":143.0,"Close":144.35,"Volume":2586730.0}...]
+        if hist is None or hist.empty:
+            return None
         output = []
         for index, row in hist.iterrows():
             d = {"Date": index.strftime("%m/%d/%Y"), "Open": row["Open"], "High": row["High"], "Low": row["Low"],
                  "Close": row["Close"], "Volume": row["Volume"]}
             output.append(d)
-
-        # reserve order
         output.reverse()
         return output
     except Exception as ex:
         print('Generated an exception: {ex}'.format(ex=ex))
-
     return None
 
 
-def get_stock_base_info():
-    print("call get_stock_base_info")
+def compute_performance(hist_data):
+    """Given 1y daily closes (oldest first), compute the perf fields as decimals."""
+    out = {"Perf Week": "-", "Perf Month": "-", "Perf Quarter": "-", "Perf Half Y": "-", "Perf Year": "-", "Perf YTD": "-"}
+    if not hist_data or len(hist_data) < 2:
+        return out
+    closes = [d["Close"] for d in hist_data]
+    today = closes[-1]
+    dates = [d["Date"] for d in hist_data]
+    now = datetime.now()
     try:
-        param = {
-            'code': afscreener_token,
-            'api': 'get-stock-report'
-        }
-        encoded_args = urlencode(param)
-        query_url = afscreener_url + '?' + encoded_args
-        ret, resp = send_post_json(query_url, str(
-            {"baseinfo_v": ["Market Cap", "ROE", "ROA", "ROI", "P/E", "P/C", "P/B", "P/S", "Dividend %", "52W Range", "52W High", "52W Low",
-                            "Target Price", "Perf Week", "Perf Month", "Perf Quarter", "Perf Half Y", "Perf Year",
-                            "Perf YTD", "Short Float", "Forward P/E", "Insider Trans", "PEG", "EPS this Y", "Inst Trans", "EPS next Y_%",
-                            "Quick Ratio", "Gross Margin", "Current Ratio", "Oper. Margin", "Debt/Eq", "EPS Q/Q", "Profit Margin",
-                            "LT Debt/Eq", "SMA20", "SMA50", "SMA200", "Sales Q/Q", "Recom", "P/FCF"
-                            ]}))
-        if ret == 0:
-            if resp["ret"] == 0:
-                return resp["data"]
-            else:
-                print('server err = {err}, msg = {msg}'.format(err=resp["ret"], msg=resp["err_msg"]))
-        else:
-            print('send_post_json failed: {ret}'.format(ret=ret))
-
-        sys.exit(1)
-
+        ytd_date = datetime(now.year, 1, 1)
+        anchors = {"Perf Week": 5, "Perf Month": 21, "Perf Quarter": 63, "Perf Half Y": 126, "Perf Year": 250}
+        for name, n in anchors.items():
+            idx = len(closes) - 1 - n
+            if idx >= 0 and closes[idx] != 0:
+                out[name] = fmt_num(today / closes[idx] - 1)
+        # YTD
+        for d, c in zip(dates, closes):
+            dt = datetime.strptime(d, "%m/%d/%Y")
+            if dt >= ytd_date and c != 0:
+                out["Perf YTD"] = fmt_num(today / c - 1)
+                break
     except Exception as ex:
-        print('Generated an exception: {ex}'.format(ex=ex))
+        print('compute_performance exception: {ex}'.format(ex=ex))
+    return out
+
+
+def compute_ma_offsets(hist_data):
+    """SMA20/50/200 as % offset from price (decimal fraction, can be negative)."""
+    out = {"SMA20": "-", "SMA50": "-", "SMA200": "-"}
+    if not hist_data or len(hist_data) < 2:
+        return out
+    closes = [d["Close"] for d in hist_data]
+    today = closes[-1]
+    try:
+        for name, n in [("SMA20", 20), ("SMA50", 50), ("SMA200", 200)]:
+            if len(closes) >= n:
+                sma = sum(closes[-n:]) / n
+                if sma != 0:
+                    out[name] = fmt_num(today / sma - 1)
+    except Exception as ex:
+        print('compute_ma_offsets exception: {ex}'.format(ex=ex))
+    return out
+
+
+def compute_hl_offsets(hist_data):
+    """52W High / Low as signed decimal offset from current price.
+    positive = current price is above that anchor; negative = below."""
+    out = {"52W High": "-", "52W Low": "-", "52W Range": "-"}
+    if not hist_data or len(hist_data) < 2:
+        return out
+    closes = [d["Close"] for d in hist_data]
+    today = closes[-1]
+    try:
+        hi = max(closes)
+        lo = min(closes)
+        if hi != 0:
+            out["52W High"] = fmt_num(today / hi - 1)
+        if lo != 0:
+            out["52W Low"] = fmt_num(today / lo - 1)
+        out["52W Range"] = "{lo:.2f} - {hi:.2f}".format(lo=lo, hi=hi)
+    except Exception as ex:
+        print('compute_hl_offsets exception: {ex}'.format(ex=ex))
+    return out
+
+
+def get_stock_base_info(symbol):
+    """Pull fundamentals from yfinance Ticker.info. Returns dict matching the
+    original Norn stat.json schema keys, or None on failure."""
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info
+        if not info or "symbol" not in info:
+            return None
+
+        fast = None
+        try:
+            fast = stock.fast_info
+        except Exception:
+            fast = None
+
+        close = None
+        try:
+            if fast is not None:
+                close = fast.last_price
+        except Exception:
+            close = None
+        if close is None:
+            close = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+
+        mc = info.get("marketCap") or (fast.market_cap if fast else None)
+        shares = info.get("sharesOutstanding")
+        if not shares and fast is not None:
+            try:
+                shares = fast.shares
+            except Exception:
+                shares = None
+
+        fcf = info.get("freeCashflow")
+        ocf = info.get("operatingCashflow")
+        fcf_sh = None
+        p_fcf = "-"
+        if fcf is not None and shares:
+            fcf_sh = fcf / shares
+        if fcf_sh is not None and close and fcf_sh != 0:
+            p_fcf = fmt_num(close / fcf_sh)
+
+        recom = info.get("recommendationMean")
+        if recom is None:
+            rec_key = info.get("recommendationKey")
+            if rec_key == "buy":
+                recom = 2.0
+            elif rec_key == "hold":
+                recom = 3.0
+            elif rec_key == "sell":
+                recom = 4.0
+            elif rec_key == "strong_buy":
+                recom = 1.0
+            elif rec_key == "strong_sell":
+                recom = 5.0
+
+        div_yield = info.get("dividendYield")
+        if div_yield is not None:
+            div_yield = float(div_yield)
+
+        pe = info.get("trailingPE")
+        forward_pe = info.get("forwardPE")
+
+        # dividend %: yfinance dividendYield is a decimal (e.g. 0.0072). Keep as decimal.
+        sector_name = info.get("sector")
+        industry_name = info.get("industry")
+        stat = {
+            "sector": SECTOR_INDEX.get(sector_name, "-1"),
+            "industry": INDUSTRY_INDEX.get(industry_name, "-1"),
+            "P/E": pct_decimal(pe),
+            "P/B": pct_decimal(info.get("priceToBook")),
+            "Dividend %": pct_decimal(div_yield),
+            "Market Cap": mc if mc else "-",
+            "ROE": pct_decimal(info.get("returnOnEquity")),
+            "ROA": pct_decimal(info.get("returnOnAssets")),
+            "ROI": pct_decimal(info.get("returnOnCapitalEmployed") or info.get("returnOnEquity")),
+            "P/C": "-",
+            "P/S": pct_decimal(info.get("priceToSalesTrailing12Months")),
+            "Target Price": fmt_num(info.get("targetMeanPrice")),
+            "Short Float": pct_decimal(info.get("shortPercentOfFloat")),
+            "Forward P/E": pct_decimal(forward_pe),
+            "Insider Trans": "-",
+            "PEG": pct_decimal(info.get("pegRatio")),
+            "EPS this Y": pct_decimal(info.get("earningsGrowth")),
+            "Inst Trans": "-",
+            "EPS next Y_%": pct_decimal(info.get("earningsQuarterlyGrowth")),
+            "Quick Ratio": pct_decimal(info.get("quickRatio")),
+            "Gross Margin": pct_decimal(info.get("grossMargins")),
+            "Current Ratio": pct_decimal(info.get("currentRatio")),
+            "Oper. Margin": pct_decimal(info.get("operatingMargins")),
+            "Debt/Eq": pct_decimal(info.get("debtToEquity")),
+            "EPS Q/Q": pct_decimal(info.get("earningsQuarterlyGrowth")),
+            "Profit Margin": pct_decimal(info.get("profitMargins")),
+            "LT Debt/Eq": "-",
+            "Sales Q/Q": pct_decimal(info.get("revenueGrowth")),
+            "Recom": fmt_num(recom),
+            "P/FCF": p_fcf,
+            "beneish": "-",
+        }
+
+        # EPS next Y_% - earningsGrowth is "this year" EPS growth in yfinance;
+        # use earningsEstimate growth if present. earningsQuarterlyGrowth is Q/Q.
+        eps_next_y = info.get("earningsQuarterlyGrowth")
+        stat["EPS next Y_%"] = pct_decimal(eps_next_y)
+
+        # EPS next 5Y / past 5Y / Sales past 5Y: not in info; leave "-"
+        stat["EPS next 5Y"] = "-"
+        stat["EPS past 5Y"] = "-"
+        stat["Sales past 5Y"] = "-"
+
+        return stat
+    except Exception as ex:
+        print('get_stock_base_info exception for {symbol}: {ex}'.format(symbol=symbol, ex=ex))
+    return None
 
 
 def str2timestamp(d):
@@ -187,9 +309,9 @@ def str2timestamp(d):
 
 
 def parse_stock_hl_pv(stock_data):
-    print('do get_stock_hl_pv_db')
-    # [{"Date":"10/15/2021","Open":153.14,"High":153.89,"Low":152.55,"Close":153.27,"Volume":1386930.0}, ...
     output = {"PH": 0, "PL": 0, "VH": 0}
+    if not stock_data:
+        return output
     max_p = stock_data[0]["Close"]
     min_p = stock_data[0]["Close"]
     max_v = stock_data[0]["Volume"]
@@ -203,90 +325,68 @@ def parse_stock_hl_pv(stock_data):
         if day_data["Volume"] > max_v:
             max_v = day_data["Volume"]
             output["VH"] = str2timestamp(day_data["Date"])
-
     return output
-
-
-def update_stock_hl_pv_db(data):
-    print("call update_stock_hl_pv_db")
-    try:
-        param = {
-            'code': afscreener_token,
-            'api': 'update-stock-high-low-price-volume'
-        }
-        encoded_args = urlencode(param)
-        query_url = afscreener_url + '?' + encoded_args
-        ret, resp = send_post_json(query_url, str({"data": data}))
-        if ret == 0:
-            print('update_stock_hl_pv_db done')
-            return
-        else:
-            print('send_post_json failed: {ret}'.format(ret=ret))
-
-        sys.exit(1)
-
-    except Exception as ex:
-        print('Generated an exception: {ex}'.format(ex=ex))
 
 
 def main():
     root = pathlib.Path(__file__).parent.resolve()
-    norn_data_folder_path = root / ".." / "norn-data"
+    # stat.json is consumed by the front-end from Gatsby's static/ dir
+    stock_folder_path = root / ".." / ".." / "static"
+    if not os.path.exists(stock_folder_path):
+        os.makedirs(stock_folder_path)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "-input-symbol-list", dest="input", default="")
-    args = parser.parse_args()
+    stock_info = get_stock_universe()
+    if not stock_info:
+        print("empty stock universe, exit")
+        sys.exit(1)
 
-    stock_folder_path = norn_data_folder_path / "stock"
-    stock_historical_folder_path = stock_folder_path / "historical-quotes"
-    if not os.path.exists(stock_historical_folder_path):
-        os.makedirs(stock_historical_folder_path)
+    print("scanning {n} symbols".format(n=len(stock_info)))
 
-    # get stock info
-    if args.input == "":
-        stock_info = get_stock_info()
-        with open(stock_folder_path / 'info.json', 'w', encoding='utf-8') as f:
-            f.write(json.dumps(stock_info, separators=(',', ':')))
-    else:
-        stock_info = args.input.split(",")
+    load_industry_index()
+    print("industry index size: {n}".format(n=len(INDUSTRY_INDEX)))
 
-    print(stock_info)
-
-    # get stock 1y data
     stock_stat = {}
-    stock_hl_pv = {}
-    for symbol in stock_info:
-        # stock_data = get_stock_1y_data_from_marketwatch(symbol)
+    failed = []
+    for idx, symbol in enumerate(stock_info):
         stock_data = get_stock_1y_data_from_yahoo(symbol)
         if stock_data and len(stock_data) > 0 and not math.isnan(stock_data[0]["Close"]):
-            stock_stat[symbol] = {"Close": stock_data[0]["Close"], "P/E": "-", "P/B": "-", "Dividend %": "-", "52W High": "-", "52W Low": "-",
-                                  "Perf Week": "-", "Perf Month": "-", "Perf Quarter": "-", "Perf Half Y": "-", "Perf Year": "-", "Perf YTD": "-"}
-            with open(stock_historical_folder_path / (symbol + '.json'), 'w', encoding='utf-8') as f:
-                f.write(json.dumps(stock_data, separators=(',', ':')))
+            stat = {
+                "Close": stock_data[0]["Close"],
+                "P/E": "-", "P/B": "-", "Dividend %": "-", "52W High": "-", "52W Low": "-",
+                "Perf Week": "-", "Perf Month": "-", "Perf Quarter": "-", "Perf Half Y": "-",
+                "Perf Year": "-", "Perf YTD": "-",
+            }
+            perf = compute_performance(stock_data)
+            ma = compute_ma_offsets(stock_data)
+            hl = compute_hl_offsets(stock_data)
+            stat.update(perf)
+            stat.update(ma)
+            stat.update(hl)
 
-            stock_hl_pv[symbol] = parse_stock_hl_pv(stock_data)
+            base = get_stock_base_info(symbol)
+            if base:
+                stat.update(base)
 
-            print('download stock ' + symbol + ' done')
+            stock_stat[symbol] = stat
+            if (idx + 1) % 50 == 0:
+                print('download stock {symbol} ({idx}/{total}) done'.format(symbol=symbol, idx=idx + 1, total=len(stock_info)))
         else:
-            print('stock ' + symbol + ' is null')
+            failed.append(symbol)
+            print('stock {symbol} is null'.format(symbol=symbol))
 
         time.sleep(DELAY_TIME_SEC)
 
-    update_stock_hl_pv_db(stock_hl_pv)
-
-    # get stock base info
-    base_info = get_stock_base_info()
-    for info in base_info:
-        symbol = info["symbol"]
-        if symbol in stock_stat:
-            for key in info:
-                if key != "symbol":
-                    stock_stat[symbol][key] = info[key]
-    
     with open(stock_folder_path / 'stat.json', 'w', encoding='utf-8') as f:
         f.write(json.dumps(stock_stat, separators=(',', ':')))
 
-    print('all task done')
+    with open(stock_folder_path / 'info.json', 'w', encoding='utf-8') as f:
+        f.write(json.dumps(list(stock_stat.keys()), separators=(',', ':')))
+
+    if failed:
+        with open(stock_folder_path / 'failed.json', 'w', encoding='utf-8') as f:
+            f.write(json.dumps(failed, separators=(',', ':')))
+
+    print('all task done. got {n} stocks, failed {m}'.format(n=len(stock_stat), m=len(failed)))
 
 
 if __name__ == "__main__":

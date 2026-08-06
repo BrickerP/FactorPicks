@@ -1,0 +1,293 @@
+import { MFDataTemplate } from './mf'
+
+// ============================================================
+// Pure-frontend query engine replacing the private Norn backend.
+// Operates directly on the stat.json dataset ({symbol: {fields...}}).
+//
+// scope: supports the baseArg / advArg interval filters, sector &
+//        industry selection, a simplified multi-factor score, and a
+//        simplified risk score (replacing the NornMinehunter master
+//        strategy engine, which lived server-side).
+// ============================================================
+
+const NUM_FIELDS = new Set([
+  'P/E', 'P/B', 'Dividend %', 'Market Cap', 'ROE', 'ROA', 'ROI', 'P/C',
+  'P/S', 'Target Price', 'Short Float', 'Forward P/E', 'Insider Trans',
+  'PEG', 'EPS this Y', 'Inst Trans', 'EPS next Y_%', 'Quick Ratio',
+  'Gross Margin', 'Current Ratio', 'Oper. Margin', 'Debt/Eq', 'EPS Q/Q',
+  'Profit Margin', 'LT Debt/Eq', 'Sales Q/Q', 'Recom', 'P/FCF', 'Payout',
+  'Short Ratio', '52W High', '52W Low', 'RSI (14)', 'Perf Week', 'Perf Month',
+  'Perf Quarter', 'Perf Half Y', 'Perf Year', 'Perf YTD', 'Beta', 'ATR',
+  'SMA20', 'SMA50', 'SMA200', 'Insider Own', 'Inst Own', 'EPS next 5Y',
+  'EPS past 5Y', 'Sales past 5Y', 'EPS last 1Q', 'EPS last 2Q',
+  'Beneish Model', 'HL_PV_PH', 'HL_PV_PL', 'HL_PV_VH',
+  'ShareOutstandingHalfYear', 'ShareOutstandingOneYear',
+  'ESG_TotalEsg', 'ESG_EnvironmentScore', 'ESG_SocialScore',
+  'ESG_GovernanceScore', 'ESG_Percentile', 'Recomm_RecommendationMean',
+])
+
+// percentage-threshold filters: stored as decimals (0.05 = 5%), the UI
+// thresholds are raw numbers (5 = 5%). scale by 1/100.
+const PERCENT_FIELDS = new Set([
+  'Dividend %', 'ROE', 'ROA', 'ROI', 'EPS this Y', 'EPS next Y_%',
+  'EPS next 5Y', 'EPS past 5Y', 'Sales past 5Y', 'Short Float',
+  'Insider Trans', 'Inst Trans', 'Gross Margin', 'Oper. Margin',
+  'Profit Margin', 'Payout', 'Insider Own', 'Inst Own', 'Perf Week',
+  'Perf Month', 'Perf Quarter', 'Perf Half Y', 'Perf Year', 'Perf YTD',
+  'SMA20', 'SMA50', 'SMA200', '52W High', '52W Low', 'EPS last 1Q',
+  'EPS last 2Q', 'ShareOutstandingHalfYear', 'ShareOutstandingOneYear',
+])
+
+// price-like fields (units not percent): stored as plain numbers.
+const PRICE_FIELDS = new Set([
+  'Market Cap', 'P/E', 'P/B', 'P/C', 'P/S', 'P/FCF', 'Forward P/E',
+  'Quick Ratio', 'Current Ratio', 'Debt/Eq', 'LT Debt/Eq', 'PEG',
+  'Short Ratio', 'Beta', 'ATR', 'RSI (14)', 'Target Price', 'Recom',
+  'Recomm_RecommendationMean',
+])
+
+const NO_DATA_SENTINELS = ['-', '', 'null', null, undefined, 'NaN']
+
+function toNumber(v) {
+  if (NO_DATA_SENTINELS.includes(v)) return null
+  const n = typeof v === 'number' ? v : parseFloat(v)
+  return Number.isFinite(n) ? n : null
+}
+
+// Apply a field's [from, end] interval constraint.
+function fieldWithin(field, value, from, end) {
+  const n = toNumber(value)
+  if (n === null) return false
+  let fromV = null
+  let endV = null
+  if (from !== '' && from != null) {
+    fromV = parseFloat(from)
+    if (PERCENT_FIELDS.has(field)) fromV = fromV / 100
+  }
+  if (end !== '' && end != null) {
+    endV = parseFloat(end)
+    if (PERCENT_FIELDS.has(field)) endV = endV / 100
+  }
+  if (fromV !== null && !Number.isNaN(fromV) && n < fromV) return false
+  if (endV !== null && !Number.isNaN(endV) && n > endV) return false
+  return true
+}
+
+// Market Cap special handling: stored in USD ($), UI thresholds are "$x mln"/"$x bln".
+function marketCapWithin(value, from, end) {
+  const n = toNumber(value)
+  if (n === null) return false
+  let fromV = null
+  let endV = null
+  const toUsd = (s) => {
+    const m = s.match(/([\d.]+)\s*(mln|bln|m|b)?/)
+    if (!m) return null
+    const num = parseFloat(m[1])
+    const unit = m[2]
+    if (unit === 'bln' || unit === 'b') return num * 1e9
+    if (unit === 'mln' || unit === 'm') return num * 1e6
+    return num
+  }
+  if (from !== '' && from != null) fromV = toUsd(from)
+  if (end !== '' && end != null) endV = toUsd(end)
+  if (fromV !== null && n < fromV) return false
+  if (endV !== null && n > endV) return false
+  return true
+}
+
+const FILTER_APPLIERS = {
+  'Market Cap': (row, from, end) => marketCapWithin(row['Market Cap'], from, end),
+}
+
+function applyFilter(row, filter) {
+  const { name, from, end } = filter
+  if (from === '' && end === '') return true
+  const custom = FILTER_APPLIERS[name]
+  if (custom) return custom(row, from, end)
+  const value = row[name]
+  return fieldWithin(name, value, from, end)
+}
+
+// ---------------- Multi-factor scoring ----------------
+// z-score each factor across the whole universe, weight, sum.
+function computeMultiFactorScores(data, weights) {
+  const symbols = Object.keys(data)
+  const factorNames = weights.map(w => w.name)
+
+  const raw = {}
+  factorNames.forEach(name => { raw[name] = {} })
+
+  // collect raw values per factor
+  symbols.forEach(sym => {
+    const row = data[sym]
+    factorNames.forEach(name => {
+      let val = null
+      switch (name) {
+        case 'E/P_w': val = row['P/E'] ? 1 / toNumber(row['P/E']) : null; break
+        case 'B/P_w': val = row['P/B'] ? 1 / toNumber(row['P/B']) : null; break
+        case 'S/P_w': val = row['P/S'] ? 1 / toNumber(row['P/S']) : null; break
+        case 'FCF/P_w': val = row['P/FCF'] ? 1 / toNumber(row['P/FCF']) : null; break
+        case 'ROA_w': val = toNumber(row['ROA']); break
+        case 'ROE_w': val = toNumber(row['ROE']); break
+        case 'ROI_w': val = toNumber(row['ROI']); break
+        case 'DIV_w': val = toNumber(row['Dividend %']); break
+        case 'InsiderOwn_w': val = toNumber(row['Insider Own']); break
+        case 'InsiderTrans_w': val = toNumber(row['Insider Trans']); break
+        case 'InstOwn_w': val = toNumber(row['Inst Own']); break
+        case 'InstTrans_w': val = toNumber(row['Inst Trans']); break
+        case 'TgtPrice_w': {
+          const price = toNumber(row['Close'])
+          const tgt = toNumber(row['Target Price'])
+          val = (price && tgt) ? tgt / price - 1 : null
+          break
+        }
+        case 'ShortFloat_w': val = toNumber(row['Short Float']); break
+        case 'ShortRatio_w': val = toNumber(row['Short Ratio']); break
+        case 'E_Q/P_w': val = row['P/E'] ? 1 / toNumber(row['P/E']) : null; break
+        case 'Range52W_w': {
+          const hi = toNumber(row['52W High'])
+          const lo = toNumber(row['52W Low'])
+          val = (hi != null && lo != null) ? hi - lo : null
+          break
+        }
+        case 'ShareOutstandingHalfYear_w': val = toNumber(row['ShareOutstandingHalfYear']); break
+        case 'ShareOutstandingOneYear_w': val = toNumber(row['ShareOutstandingOneYear']); break
+        default: val = null
+      }
+      raw[name][sym] = val
+    })
+  })
+
+  // z-score each factor (skip factors where fewer than 10 valid values)
+  const zscores = {}
+  factorNames.forEach(name => {
+    const vals = {}
+    const list = []
+    symbols.forEach(sym => {
+      const v = raw[name][sym]
+      if (v != null) { vals[sym] = v; list.push(v) }
+    })
+    if (list.length < 10) { zscores[name] = {}; return }
+    const mean = list.reduce((a, b) => a + b, 0) / list.length
+    const varSum = list.reduce((a, b) => a + (b - mean) ** 2, 0) / list.length
+    const std = Math.sqrt(varSum)
+    if (!std || std === 0) { zscores[name] = {}; return }
+    Object.entries(vals).forEach(([sym, v]) => {
+      zscores[name][sym] = (v - mean) / std
+    })
+  })
+
+  // weighted sum
+  const weightsMap = {}
+  weights.forEach(w => { weightsMap[w.name] = parseFloat(w.val) || 0 })
+
+  const out = {}
+  symbols.forEach(sym => {
+    let total = 0
+    let wSum = 0
+    factorNames.forEach(name => {
+      const z = zscores[name][sym]
+      if (z != null) {
+        const w = weightsMap[name]
+        total += z * w
+        wSum += w
+      }
+    })
+    out[sym] = wSum > 0 ? total / wSum : null
+  })
+  return out
+}
+
+// ---------------- Simplified risk score ----------------
+// Replaces the NornMinehunter master-strategy engine. Lower = better (0-100).
+// Heuristic combines profitability, leverage, valuation & stability.
+function computeRiskScores(data) {
+  const out = {}
+  Object.keys(data).forEach(sym => {
+    const row = data[sym]
+    let score = 50
+    const roe = toNumber(row['ROE'])
+    const pe = toNumber(row['P/E'])
+    const debtEq = toNumber(row['Debt/Eq'])
+    const profitMargin = toNumber(row['Profit Margin'])
+    const fcf = toNumber(row['P/FCF'])
+    if (roe != null) score += (roe > 0 ? 0 : 20) - Math.min(roe, 0.3) * 40
+    if (profitMargin != null) score += (profitMargin > 0 ? 0 : 15)
+    if (debtEq != null) score += Math.min(debtEq, 4) * 5
+    if (pe != null && pe > 0) score += Math.max(0, (pe - 15) / 35) * 10
+    if (fcf != null && fcf > 0) score += Math.max(0, (fcf - 20) / 40) * 10
+    out[sym] = Math.max(0, Math.min(100, Math.round(score)))
+  })
+  return out
+}
+
+// ---------------- Main query ----------------
+export function queryStocks(data, queryData) {
+  const q = queryData.data
+  const baseArg = q.baseArg || []
+  const advArg = q.advArg || []
+  const sectorIndustries = q.sector_industries || {}
+  const nm = q.NornMinehunter || {}
+  const mf = q.Factor_Intersectional_v1 || {}
+
+  const rows = Object.keys(data).map(symbol => ({ symbol, ...data[symbol] }))
+
+  // ---- scores computed against the FULL universe (before filtering), so the
+  //      z-score ranks and risk scores are cross-sectional, like the original
+  //      server-side implementation.
+  const weights = mf && mf.args && Object.keys(mf.args).length
+    ? MFDataTemplate.weights.filter(w => mf.args[w.name] !== undefined).map(w => ({ name: w.name, val: mf.args[w.name] }))
+    : MFDataTemplate.weights
+  const mfScores = computeMultiFactorScores(data, weights)
+  const riskScores = computeRiskScores(data)
+
+  let filtered = rows
+
+  // interval filters
+  const filters = [...baseArg, ...advArg]
+  filters.forEach(f => {
+    if (f.from !== '' || f.end !== '') {
+      filtered = filtered.filter(row => applyFilter(row, f))
+    }
+  })
+
+  // sector / industry
+  if (sectorIndustries.sectors && sectorIndustries.sectors.length) {
+    filtered = filtered.filter(row => sectorIndustries.sectors.includes(String(row.sector)))
+  }
+  if (sectorIndustries.industries && sectorIndustries.industries.length) {
+    filtered = filtered.filter(row => sectorIndustries.industries.includes(String(row.industry)))
+  }
+
+  // NornMinehunter risk score range filter (simplified risk score)
+  if (nm && (nm.from !== '' && nm.from != null || nm.end !== '' && nm.end != null)) {
+    const from = parseFloat(nm.from)
+    const end = parseFloat(nm.end)
+    filtered = filtered.filter(row => {
+      const score = riskScores ? riskScores[row.symbol] : null
+      if (score == null) return false
+      if (!Number.isNaN(from) && score < from) return false
+      if (!Number.isNaN(end) && score > end) return false
+      return true
+    })
+  }
+
+  const output = filtered.map((row, index) => ({
+    id: index,
+    symbol: row.symbol,
+    sector: row.sector,
+    industry: row.industry,
+    marketCap: row['Market Cap'] === '-' || row['Market Cap'] == null ? -Number.MAX_VALUE : toNumber(row['Market Cap']),
+    PE: row['P/E'] === '-' || row['P/E'] == null ? -Number.MAX_VALUE : toNumber(row['P/E']),
+    PB: row['P/B'] === '-' || row['P/B'] == null ? -Number.MAX_VALUE : toNumber(row['P/B']),
+    price: row['Close'] === '-' || row['Close'] == null ? -Number.MAX_VALUE : toNumber(row['Close']),
+    change: null,
+    volume: null,
+    beneish_score: row['beneish'] === '-' || row['beneish'] == null ? -Number.MAX_VALUE : toNumber(row['beneish']),
+    risk: riskScores[row.symbol] != null ? riskScores[row.symbol] : -Number.MAX_VALUE,
+    multiFactor: mfScores[row.symbol] != null ? mfScores[row.symbol] : -Number.MAX_VALUE,
+    tactics: '',
+  }))
+
+  return output
+}

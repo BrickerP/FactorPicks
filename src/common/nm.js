@@ -131,8 +131,8 @@ export const NMDataTemplate = {
   default_index: 3
 }
 
-export const NMUrl = "https://norn-minehunter.zmcx16.moe/"
+export const NMUrl = "https://finviz.com/"
 export const NMNote = `Do you want to know the stocks which you hold are Treasure or Bomb?
-Norn-Minehunter can help you to scan the stock financial & technical data to inspect the company's financial health & trend.
+The risk score is a simplified heuristic (profitability, leverage, valuation & cash flow) computed entirely on the client-side, replacing the original server-side Norn-Minehunter engine.
 [Note. The avg score is the lower the better, but the No Data also can cause avg score is lower.]
 `

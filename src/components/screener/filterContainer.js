@@ -8,11 +8,11 @@ import { ThemeProvider } from '@mui/styles'
 
 import { isMobile } from 'react-device-detect'
 import shortid from "shortid"
-import useFetch from 'use-http'
+import { withPrefix } from 'gatsby'
 
 import { StockSectorDict, StockIndustryDict} from '../../common/stockdef'
 import { FCDataTemplate } from '../../common/argsList'
-import { NSSServerUrl, NSSDoQueryAPI } from '../../common/common'
+import { queryStocks } from '../../common/queryStocks'
 import FilterCriteria from './filterCriteria'
 import ModalWindow from '../modalWindow'
 import NornMinehunter from './nornMinehunter'
@@ -55,9 +55,6 @@ const getCurrentSetting = (filterCriteriaListRef, nornMinehunterRef, multiFactor
 
 // split from FilterContainer to prevent rerender FilterContainer
 const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, nornMinehunterRef, multiFactorRef, filterSectorsIndustriesRef, ResultTableRef, modalWindowRef}) => {
-  
-  //const { post, response } = useFetch('https://localhost:44305')
-  const { post, response } = useFetch(NSSServerUrl)
 
   queryStocksRef.current = {
     doQuery: async () => {
@@ -67,39 +64,39 @@ const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, n
       let queryData = getCurrentSetting(filterCriteriaListRef, nornMinehunterRef, multiFactorRef, filterSectorsIndustriesRef)
       console.log(queryData)
 
-      const resp_data = await post(NSSDoQueryAPI, queryData)
-      if (response.ok) {
-        console.log(resp_data)
-
-        if (resp_data['ret'] === 0){
-
-          let output = resp_data['data'].map((value, index)=>{
-            return { 
-              id: index, 
-              symbol: value['symbol'], 
-              sector: value['sector'] in StockSectorDict ? StockSectorDict[value['sector'].toString()] : StockSectorDict["-1"],
-              industry: value['sector'] in StockIndustryDict ? StockIndustryDict[value['industry'].toString()] : StockIndustryDict["-1"],
-              marketCap: value['marketCap'] === '-' ? -Number.MAX_VALUE : value['marketCap'],
-              PE: value['PE'] === '-' ? -Number.MAX_VALUE : value['PE'],
-              PB: value['PB'] === '-' ? -Number.MAX_VALUE : value['PB'],
-              price: value['price'] === '-' ? -Number.MAX_VALUE : value['price'],
-              change: value['change'] === '-' ? -Number.MAX_VALUE : value['change'],
-              volume: value['volume'] === '-' ? -Number.MAX_VALUE : value['volume'],
-              beneish_score: value['beneish_score'] < -10000000 ? -Number.MAX_VALUE : value['beneish_score'],
-              risk: value['risk'] === -1 ? -Number.MAX_VALUE : value['risk'],
-              multiFactor: value['mf_score'],
-              tactics: nornMinehunterRef.current.getEnableTacticStrings(),
-            }
-          })
-
-          ResultTableRef.current.setTable(output)
-
-        }else {
-          modalWindowRef.current.popModalWindow(<h2>Get Search Result Failed, ret={resp_data['ret']}</h2>)
+      try {
+        // Load the factor dataset. stat.json lives in static/ and is built by the
+        // fetch_stock_data workflow (yfinance -> stat.json).
+        const resp = await fetch(withPrefix('stat.json'))
+        if (!resp.ok) {
+          throw new Error('stat.json fetch failed: ' + resp.status)
         }
+        const stockStat = await resp.json()
 
-      }else {
-        modalWindowRef.current.popModalWindow(<h2>Get Search Result Failed.</h2>)
+        let output = queryStocks(stockStat, queryData).map((value, index)=>{
+          return {
+            id: index,
+            symbol: value['symbol'],
+            sector: value['sector'] in StockSectorDict ? StockSectorDict[value['sector'].toString()] : StockSectorDict["-1"],
+            industry: value['industry'] in StockIndustryDict ? StockIndustryDict[value['industry'].toString()] : StockIndustryDict["-1"],
+            marketCap: value['marketCap'],
+            PE: value['PE'],
+            PB: value['PB'],
+            price: value['price'],
+            change: value['change'],
+            volume: value['volume'],
+            beneish_score: value['beneish_score'],
+            risk: value['risk'],
+            multiFactor: value['multiFactor'],
+            tactics: nornMinehunterRef.current.getEnableTacticStrings(),
+          }
+        })
+
+        ResultTableRef.current.setTable(output)
+
+      } catch (err) {
+        console.error(err)
+        modalWindowRef.current.popModalWindow(<h2>Query Failed: {String(err && err.message ? err.message : err)}</h2>)
       }
 
       loadingAnimeRef.current.setLoading(false)

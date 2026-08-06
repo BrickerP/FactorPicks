@@ -1,71 +1,51 @@
-name: FetchStockData
+name: FetchStockDataAndDeploy
 
 on:
   workflow_dispatch:
   schedule:
     - cron:  '10 2 * * *'
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master'
     steps:
     - name: Check out repo
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
+
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: 3.12
-    - uses: actions/cache@v4
-      name: Configure pip caching
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-    - name: Copy github ci files to ci-folder
-      run: |-
-        cp -r ./.github/fetch_stock_data ./ci-folder
-    - name: Checkout gh-pages branch
-      run: |-
-        git checkout gh-pages
+
     - name: Install Python dependencies
       run: |
-        python -m pip install -r ./ci-folder/requirements.txt
-    - name: Fetch stock-data
-      env:
-        AF_URL: ${{ secrets.AF_URL }}
-        AF_TOKEN: ${{ secrets.AF_TOKEN }}
-      run: |-
-        python ./ci-folder/fetch_stock_data.py
-    - name: Delete ci-folder
-      run: |-
-        rm -rf ./ci-folder
-    - name: Add stock-data and push it
-      run: |-
-        git config --global user.name "zmcx16-bot"
-        git config --global user.email "zmcx16-bot@zmcx16.moe"
-        git config --global pull.ff only
-        git pull
-        git reset --soft HEAD~1
-        git add ./norn-data/\* && git commit -m "updated website & stock-data"
-        git push -f
-    - name: Checkout zmcx16.github.io
-      uses: actions/checkout@master
-      with: 
-        repository: zmcx16/zmcx16.github.io
-        token: ${{ secrets.ACTIONS_TOKEN }}
-        path: ./zmcx16.github.io
-    - name: Copy stock-data & push zmcx16.github.io
-      run: |-
-        cp -r ./norn-data/stock ./zmcx16.github.io/
-        cd ./zmcx16.github.io
-        rm -rf ./stock-data
-        mv stock stock-data
-        git config --global user.name "zmcx16-bot"
-        git config --global user.email "zmcx16-bot@zmcx16.moe"
-        git add ./stock-data/\* && git commit -m "updated stock-data"
-        git push
+        python -m pip install -r ./.github/fetch_stock_data/requirements.txt
 
+    - name: Fetch stock data (yfinance -> static/stat.json)
+      run: |
+        python ./.github/fetch_stock_data/fetch_stock_data.py
+        ls -la static/ && du -sh static/stat.json
+
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 16
+
+    - name: Install frontend deps
+      run: |
+        npm install
+
+    - name: Gatsby build
+      run: |
+        npx gatsby build --prefix-paths
+
+    - name: Deploy to gh-pages
+      uses: peaceiris/actions-gh-pages@v4
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./public
