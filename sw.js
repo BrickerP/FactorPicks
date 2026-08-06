@@ -27,33 +27,42 @@ workbox.core.clientsClaim();
  */
 self.__precacheManifest = [
   {
-    "url": "webpack-runtime-9ffdd78cfed08d0b37c3.js"
+    "url": "webpack-runtime-9acc3b5bccc368ba3b12.js"
   },
   {
     "url": "framework-cf6ff516a1978576dfe4.js"
   },
   {
-    "url": "app-70caeeb5875482bc77ed.js"
+    "url": "app-dad858906b02467ccdc7.js"
   },
   {
     "url": "offline-plugin-app-shell-fallback/index.html",
-    "revision": "49435f4db5520734d1c95e1151a8cfa9"
+    "revision": "98853a735e757d7f9e13356ccdc8ed37"
   },
   {
-    "url": "component---cache-caches-gatsby-plugin-offline-app-shell-js-e0390a63ea14897b07f5.js"
+    "url": "component---cache-caches-gatsby-plugin-offline-app-shell-js-49be599b1ad8fa2a8465.js"
   },
   {
-    "url": "polyfill-2e5e41731c1a451d4093.js"
+    "url": "page-data/offline-plugin-app-shell-fallback/page-data.json",
+    "revision": "f6081b83111aea4128c98944b7fafccc"
+  },
+  {
+    "url": "page-data/app-data.json",
+    "revision": "a8dc4f4cd71a250bb22edfa1ccb3ff51"
+  },
+  {
+    "url": "polyfill-74d6d6f8f4507f0091d0.js"
   },
   {
     "url": "manifest.webmanifest",
-    "revision": "dd452ce4f0aaf5a6c7b8b9f5849f3e5c"
+    "revision": "8001486649114359340c830141397fa7"
   }
 ].concat(self.__precacheManifest || []);
 workbox.precaching.precacheAndRoute(self.__precacheManifest, {});
 
 workbox.routing.registerRoute(/(\.js$|\.css$|static\/)/, new workbox.strategies.CacheFirst(), 'GET');
-workbox.routing.registerRoute(/^https?:.*\.(png|jpg|jpeg|webp|avif|svg|gif|tiff|js|woff|woff2|css)$/, new workbox.strategies.StaleWhileRevalidate(), 'GET');
+workbox.routing.registerRoute(/^https?:.*\/page-data\/.*\.json/, new workbox.strategies.StaleWhileRevalidate(), 'GET');
+workbox.routing.registerRoute(/^https?:.*\.(png|jpg|jpeg|webp|avif|svg|gif|tiff|js|woff|woff2|json|css)$/, new workbox.strategies.StaleWhileRevalidate(), 'GET');
 workbox.routing.registerRoute(/^https?:\/\/fonts\.googleapis\.com\/css/, new workbox.strategies.StaleWhileRevalidate(), 'GET');
 
 /* global importScripts, workbox, idbKeyval */
@@ -133,12 +142,12 @@ const navigationRoute = new NavigationRoute(async ({ event }) => {
   lastNavigationRequest = event.request.url
 
   let { pathname } = new URL(event.request.url)
-  pathname = pathname.replace(new RegExp(`^`), ``)
+  pathname = pathname.replace(new RegExp(`^/Norn-StockScreener`), ``)
 
   // Check for resources + the app bundle
   // The latter may not exist if the SW is updating to a new version
   const resources = await idbKeyval.get(`resources:${pathname}`)
-  if (!resources || !(await caches.match(`/app-70caeeb5875482bc77ed.js`))) {
+  if (!resources || !(await caches.match(`/Norn-StockScreener/app-dad858906b02467ccdc7.js`))) {
     return await fetch(event.request)
   }
 
@@ -151,7 +160,7 @@ const navigationRoute = new NavigationRoute(async ({ event }) => {
     }
   }
 
-  const offlineShell = `/offline-plugin-app-shell-fallback/index.html`
+  const offlineShell = `/Norn-StockScreener/offline-plugin-app-shell-fallback/index.html`
   const offlineShellWithKey = workbox.precaching.getCacheKeyForURL(offlineShell)
   return await caches.match(offlineShellWithKey)
 })
