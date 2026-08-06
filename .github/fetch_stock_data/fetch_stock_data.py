@@ -82,9 +82,32 @@ def pct_decimal(v):
     return fmt_num(v)
 
 
+NASDAQ_TRADER_BASE = "https://www.nasdaqtrader.com/dynamic/SymDir/"
+
+
+def _parse_nasdaq_symbols(content, is_nasdaq):
+    """Parse NASDAQ Trader symboldirectory txt into symbol list."""
+    symbols = []
+    for line in content.splitlines():
+        if line.startswith("Symbol"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 2:
+            continue
+        symbol = parts[0].strip()
+        test_issue = parts[1].strip()
+        if is_nasdaq and test_issue != "Y":
+            continue
+        # filter to common stocks: exclude ETF, preferred, etc. is done later
+        if symbol.isalpha() and symbol != "":
+            symbols.append(symbol)
+    return symbols
+
+
 def get_stock_universe():
     """Return the list of US stock symbols to scan.
-    Priority: CLI arg -> env var -> S&P500 (curated, fast for CI)."""
+    Priority: CLI arg -> env var -> NASDAQ Trader official symbol directory
+    (nasdaq + other exchanges), with a repo-cached fallback."""
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "-input-symbol-list", dest="input", default="")
     args, _ = parser.parse_known_args()
@@ -95,13 +118,27 @@ def get_stock_universe():
     if env_list:
         return [s.strip() for s in env_list.split(",") if s.strip()]
 
+    # repo-cached fallback list (avoids network entirely when present)
+    root = pathlib.Path(__file__).parent.resolve()
+    cache_file = root / ".." / ".." / "static" / "stock_symbols.txt"
+    if cache_file.exists():
+        cached = [s.strip() for s in cache_file.read_text(encoding="utf-8").splitlines() if s.strip()]
+        if cached:
+            print("using cached symbol list: {n} symbols".format(n=len(cached)))
+            return cached
+
     try:
-        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-        symbols = sp500["Symbol"].tolist()
-        print("using S&P500 universe: {n} symbols".format(n=len(symbols)))
+        symbols = []
+        for fname, is_nasdaq in [("nasdaqlisted.txt", True), ("otherlisted.txt", False)]:
+            resp = requests.get(NASDAQ_TRADER_BASE + fname, timeout=30)
+            resp.raise_for_status()
+            symbols += _parse_nasdaq_symbols(resp.text, is_nasdaq)
+        # dedupe
+        symbols = list(dict.fromkeys(symbols))
+        print("using NASDAQ Trader symbol directory: {n} symbols".format(n=len(symbols)))
         return symbols
     except Exception as ex:
-        print("fallback to wikipedia sp500 failed: {ex}".format(ex=ex))
+        print("NASDAQ Trader symbol directory failed: {ex}".format(ex=ex))
         return []
 
 
