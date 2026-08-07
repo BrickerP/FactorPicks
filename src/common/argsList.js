@@ -7,7 +7,7 @@ export const FCDataTemplate = [
     tooltip: "Market capitalization",
     core: true,
     args_items: ["Any (> $50 mln)", "$50 mln ~ $300 mln", "$300 mln ~ $2 bln", "$2 bln ~ $10 bln", "$10 bln ~ $200 bln", "> $300 mln", "> $2 bln", "> $10 bln", "> $200 bln", "< $300 mln", "< $2 bln", "< $10 bln", "< $200 bln"],
-    default_index: 6
+    default_index: 0
   },
   {
     name: "Dividend %",
@@ -53,7 +53,7 @@ export const FCDataTemplate = [
     tooltip: "Price to Earnings (ttm)",
     core: true,
     args_items: ["Any", "< 5", "< 10", "< 15", "< 20", "< 25", "< 30", "< 40", "< 50", "> 5", "> 10", "> 15", "> 20", "> 25", "> 30", "> 40", "> 50"],
-    default_index: 3
+    default_index: 0
   },
   {
     name: "Forward P/E",
@@ -205,7 +205,7 @@ export const FCDataTemplate = [
     type: 0,
     tooltip: "Total Debt to Equity (mrq)",
     args_items: ["Any", "< 0.2", "< 0.4", "< 0.6", "< 0.8", "< 1", "< 1.2", "< 1.4", "< 1.6", "< 1.8", "< 2", "> 0.2", "> 0.4", "> 0.6", "> 0.8", "> 1", "> 1.2", "> 1.4", "> 1.6", "> 1.8", "> 2"],
-    default_index: 3
+    default_index: 0
   },
   {
     name: "LT Debt/Eq",
@@ -213,7 +213,7 @@ export const FCDataTemplate = [
     type: 0,
     tooltip: "Long Term Debt to Equity (mrq)",
     args_items: ["Any", "< 0.2", "< 0.4", "< 0.6", "< 0.8", "< 1", "< 1.2", "< 1.4", "< 1.6", "< 1.8", "< 2", "> 0.2", "> 0.4", "> 0.6", "> 0.8", "> 1", "> 1.2", "> 1.4", "> 1.6", "> 1.8", "> 2"],
-    default_index: 3
+    default_index: 0
   },
   {
     name: "Insider Own",
@@ -381,7 +381,7 @@ export const FCDataTemplate = [
     type: 0,
     tooltip: "Beta",
     args_items: ["Any", "< 0.5", "< 1", "< 1.5", "< 2", "< 3", "< 4", "< 5", "> 0.5", "> 1", "> 1.5", "> 2", "> 3", "> 4", "> 5"],
-    default_index: 4
+    default_index: 0
   },
   {
     name: "ATR",

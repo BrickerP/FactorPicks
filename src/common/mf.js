@@ -3,37 +3,37 @@ export const MFDataTemplate = {
     {
       name: "E/P_w",
       display_name: "E/P weight",
-      val: "1.0"
+      val: "0"
     },
     {
       name: "B/P_w",
       display_name: "B/P weight",
-      val: "1.0"
+      val: "0"
     },
     {
       name: "S/P_w",
       display_name: "S/P weight",
-      val: "1.0"
+      val: "0"
     },
     {
       name: "FCF/P_w",
       display_name: "FCF/P weight",
-      val: "0.5"
+      val: "0"
     },
     {
       name: "FCFF/EV_w",
       display_name: "FCFF/EV weight",
-      val: "0"
+      val: "1.0"
     },
     {
       name: "PEG_w",
       display_name: "PEG weight",
-      val: "0"
+      val: "1.0"
     },
     {
       name: "ROA_w",
       display_name: "ROA weight",
-      val: "1.0"
+      val: "0"
     },
     {
       name: "ROE_w",
@@ -43,37 +43,37 @@ export const MFDataTemplate = {
     {
       name: "ROI_w",
       display_name: "ROI weight",
-      val: "1.0"
+      val: "0"
     },
     {
       name: "DIV_w",
       display_name: "Dividend % weight",
-      val: "0.5"
+      val: "0"
     },
     {
       name: "InsiderOwn_w",
       display_name: "Insider Own weight",
-      val: "0.2"
+      val: "0"
     },
     {
       name: "InsiderTrans_w",
       display_name: "Insider Trans weight",
-      val: "0.2"
+      val: "0"
     },
     {
       name: "InstOwn_w",
       display_name: "Inst Own weight",
-      val: "0.2"
+      val: "0"
     },
     {
       name: "InstTrans_w",
       display_name: "Inst Trans weight",
-      val: "0.2"
+      val: "0"
     },
     {
       name: "TgtPrice_w",
       display_name: "Target Price weight",
-      val: "0.5"
+      val: "0"
     },
     {
       name: "ShortFloat_w",
@@ -88,12 +88,12 @@ export const MFDataTemplate = {
     {
       name: "E_Q/P_w",
       display_name: "E/P (Last Q) weight",
-      val: "1.0"
+      val: "0"
     },
     {
       name: "Range52W_w",
       display_name: "52W Range weight",
-      val: "0.2"
+      val: "0"
     },
     {
       name: "ShareOutstandingHalfYear_w",
