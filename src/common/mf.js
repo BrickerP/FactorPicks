@@ -21,6 +21,16 @@ export const MFDataTemplate = {
       val: "0.5"
     },
     {
+      name: "FCFF/EV_w",
+      display_name: "FCFF/EV weight",
+      val: "0"
+    },
+    {
+      name: "PEG_w",
+      display_name: "PEG weight",
+      val: "0"
+    },
+    {
       name: "ROA_w",
       display_name: "ROA weight",
       val: "1.0"
@@ -100,9 +110,11 @@ export const MFDataTemplate = {
 
 export const MFUrl = "https://project.zmcx16.moe/?page=investment-formula"
 export const MFNote = `Ranked the stocks by multiple factors simulatneously:
-Value factor:  Earnings / Price, Book / Price, Sales / Price
+Value factor:  Earnings / Price, Book / Price, Sales / Price, FCFF/EV, PEG
 Growth factor: ROE, ROA, ROI
 Other factor:  Dividend (%), Insider ownership, Insider transcations,
                Institution ownership, Institution transcations
                Difference Target Price and Current Price
+Tip: to rank by FCFF/EV + ROE + PEG, set those three weights to 1.0 and all others to 0.
+     (lower PEG is better; higher FCFF/EV and ROE are better — all handled automatically)
 `

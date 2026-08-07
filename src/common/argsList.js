@@ -168,6 +168,14 @@ export const FCDataTemplate = [
     default_index: 0
   },
   {
+    name: "FCFF/EV",
+    display_name: "FCFF/EV",
+    type: 0,
+    tooltip: "Free Cash Flow yield on Enterprise Value (ttm)",
+    args_items: ["Any", "> 1%", "> 2%", "> 3%", "> 4%", "> 5%", "> 6%", "> 8%", "> 10%", "< 0%", "< -1%", "< -2%"],
+    default_index: 0
+  },
+  {
     name: "Quick Ratio",
     display_name: "Quick Ratio",
     type: 0,

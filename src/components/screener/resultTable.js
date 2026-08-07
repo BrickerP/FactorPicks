@@ -163,6 +163,36 @@ const ResultTable = ({ResultTableRef}) => {
       hide: 'PE' in hideColState ? hideColState['PE'] : false
     },
     {
+      field: 'PEG',
+      headerName: 'PEG',
+      width: 110,
+      type: 'number',
+      renderCell: (params) => (
+        <span>{(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN" : params.value.toFixed(2)}</span>
+      ),
+      hide: 'PEG' in hideColState ? hideColState['PEG'] : false
+    },
+    {
+      field: 'FCFFEV',
+      headerName: 'FCFF/EV',
+      width: 120,
+      type: 'number',
+      renderCell: (params) => (
+        <span>{(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN" : (params.value * 100).toFixed(1) + '%'}</span>
+      ),
+      hide: 'FCFFEV' in hideColState ? hideColState['FCFFEV'] : false
+    },
+    {
+      field: 'ROE',
+      headerName: 'ROE',
+      width: 110,
+      type: 'number',
+      renderCell: (params) => (
+        <span>{(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN" : (params.value * 100).toFixed(1) + '%'}</span>
+      ),
+      hide: 'ROE' in hideColState ? hideColState['ROE'] : false
+    },
+    {
       field: 'PB',
       headerName: 'P/B',
       width: 110,

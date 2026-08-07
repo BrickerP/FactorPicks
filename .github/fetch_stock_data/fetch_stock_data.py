@@ -260,12 +260,19 @@ def get_stock_base_info(symbol):
 
         fcf = info.get("freeCashflow")
         ocf = info.get("operatingCashflow")
+        ev = info.get("enterpriseValue")
         fcf_sh = None
         p_fcf = "-"
         if fcf is not None and shares:
             fcf_sh = fcf / shares
         if fcf_sh is not None and close and fcf_sh != 0:
             p_fcf = fmt_num(close / fcf_sh)
+
+        # FCFF / EV: free cash flow yield on enterprise value (decimal).
+        # Higher = cheaper on a FCFF basis.
+        fcff_ev = "-"
+        if fcf is not None and ev:
+            fcff_ev = fmt_num(fcf / ev)
 
         recom = info.get("recommendationMean")
         if recom is None:
@@ -322,6 +329,7 @@ def get_stock_base_info(symbol):
             "Sales Q/Q": pct_decimal(info.get("revenueGrowth")),
             "Recom": fmt_num(recom),
             "P/FCF": p_fcf,
+            "FCFF/EV": fcff_ev,
             "beneish": "-",
         }
 

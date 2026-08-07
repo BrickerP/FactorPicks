@@ -36,6 +36,7 @@ const PERCENT_FIELDS = new Set([
   'Perf Month', 'Perf Quarter', 'Perf Half Y', 'Perf Year', 'Perf YTD',
   'SMA20', 'SMA50', 'SMA200', '52W High', '52W Low', 'EPS last 1Q',
   'EPS last 2Q', 'ShareOutstandingHalfYear', 'ShareOutstandingOneYear',
+  'FCFF/EV',
 ])
 
 // price-like fields (units not percent): stored as plain numbers.
@@ -131,6 +132,8 @@ function computeMultiFactorScores(data, weights) {
         case 'B/P_w': val = row['P/B'] ? 1 / toNumber(row['P/B']) : null; break
         case 'S/P_w': val = row['P/S'] ? 1 / toNumber(row['P/S']) : null; break
         case 'FCF/P_w': val = row['P/FCF'] ? 1 / toNumber(row['P/FCF']) : null; break
+        case 'FCFF/EV_w': val = toNumber(row['FCFF/EV']); break
+        case 'PEG_w': val = row['PEG'] ? -toNumber(row['PEG']) : null; break
         case 'ROA_w': val = toNumber(row['ROA']); break
         case 'ROE_w': val = toNumber(row['ROE']); break
         case 'ROI_w': val = toNumber(row['ROI']); break
@@ -283,6 +286,9 @@ export function queryStocks(data, queryData) {
     industry: row.industry,
     marketCap: row['Market Cap'] === '-' || row['Market Cap'] == null ? -Number.MAX_VALUE : toNumber(row['Market Cap']),
     PE: row['P/E'] === '-' || row['P/E'] == null ? -Number.MAX_VALUE : toNumber(row['P/E']),
+    PEG: row['PEG'] === '-' || row['PEG'] == null ? -Number.MAX_VALUE : toNumber(row['PEG']),
+    FCFFEV: row['FCFF/EV'] === '-' || row['FCFF/EV'] == null ? -Number.MAX_VALUE : toNumber(row['FCFF/EV']),
+    ROE: row['ROE'] === '-' || row['ROE'] == null ? -Number.MAX_VALUE : toNumber(row['ROE']),
     PB: row['P/B'] === '-' || row['P/B'] == null ? -Number.MAX_VALUE : toNumber(row['P/B']),
     price: row['Close'] === '-' || row['Close'] == null ? -Number.MAX_VALUE : toNumber(row['Close']),
     change: null,
