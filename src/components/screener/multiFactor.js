@@ -11,7 +11,7 @@ import commonStyle from '../common.module.scss'
 import multiFactorStyle from './multiFactor.module.scss'
 
 
-const MultiFactor = ({ multiFactorRef }) => {
+const MultiFactor = ({ multiFactorRef, onPresetApply }) => {
 
   // multiFactorRef API
   multiFactorRef.current.getValue = () => {
@@ -82,10 +82,14 @@ const MultiFactor = ({ multiFactorRef }) => {
   const applyPreset = (presetWeights) => {
     const next = MFDataTemplate.weights.map((w, i) => {
       const v = presetWeights[w.name] !== undefined ? presetWeights[w.name] : '0'
-      weightListRef.current[i].current = { value: v }
       return { ...w, val: v }
     })
     setWeightListNode(genWeightListField(next))
+    // let React re-mount the TextFields (so inputRefs pick up the new
+    // defaultValue) before the parent re-runs the query
+    if (onPresetApply && typeof onPresetApply === 'function') {
+      setTimeout(onPresetApply, 50)
+    }
   }
 
   const display_name = 'Multi-Factor Intersectional Model'

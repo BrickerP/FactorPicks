@@ -243,7 +243,11 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
           <div></div>
         </div>
         <FilterSectorsIndustries filterSectorsIndustriesRef={filterSectorsIndustriesRef} />
-        <MultiFactor multiFactorRef={multiFactorRef} />
+        <MultiFactor multiFactorRef={multiFactorRef} onPresetApply={() => {
+          if (queryStocksRef.current && typeof queryStocksRef.current.doQuery === 'function') {
+            queryStocksRef.current.doQuery()
+          }
+        }} />
         <ThemeProvider theme={customTheme}>
           <div className={filterContainerStyle.cmdPanel}>
             <div></div>
