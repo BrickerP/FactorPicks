@@ -24,3 +24,18 @@
   display: flex;
   flex-wrap: wrap;
 }
+
+.presetBlock {
+  padding: 6px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  border-bottom: 1px dashed #ccc;
+  margin-bottom: 6px;
+}
+
+.presetLabel {
+  font-weight: 600;
+  font-size: 14px;
+  margin-right: 4px;
+}

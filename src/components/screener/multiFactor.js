@@ -107,14 +107,27 @@ const MultiFactor = ({ multiFactorRef }) => {
           </Link>
         </NoMaxWidthTooltip>
       </div>
-      <div>
+      <div className={multiFactorStyle.presetBlock}>
+        <span className={multiFactorStyle.presetLabel}>Rank by:</span>
         <Button variant="contained" size="small" color="primary" style={{ margin: '4px 8px' }}
-          onClick={() => applyPreset({
-            ROE_w: '1.0',
-            'FCFF/EV_w': '1.0',
-            PEG_w: '1.0',
-          })}>
-          Preset: Cheap+Quality (ROE+FCFF/EV+PEG)
+          onClick={() => applyPreset({ ROE_w: '1.0', 'FCFF/EV_w': '1.0', PEG_w: '1.0' })}>
+          Quality+Value (ROE+PEG+FCFF/EV)
+        </Button>
+        <Button variant="contained" size="small" style={{ margin: '4px 8px' }}
+          onClick={() => applyPreset({ ROE_w: '1.0' })}>
+          ROE
+        </Button>
+        <Button variant="contained" size="small" style={{ margin: '4px 8px' }}
+          onClick={() => applyPreset({ PEG_w: '1.0' })}>
+          PEG
+        </Button>
+        <Button variant="contained" size="small" style={{ margin: '4px 8px' }}
+          onClick={() => applyPreset({ 'FCFF/EV_w': '1.0' })}>
+          FCFF/EV
+        </Button>
+        <Button variant="contained" size="small" color="secondary" style={{ margin: '4px 8px' }}
+          onClick={() => applyPreset({ ROE_w: '1.0', 'FCFF/EV_w': '1.0', PEG_w: '1.0' })}>
+          Reset (Quality+Value)
         </Button>
       </div>
       <div className={multiFactorStyle.weightBlock}>
