@@ -38,7 +38,10 @@ const getCurrentSetting = (filterCriteriaListRef, multiFactorRef, filterSectorsI
 
   // get basic arg
   FCDataTemplate.forEach((value, index) => {
-    let argVal = filterCriteriaListRef.current[index].current.getValue()
+    const criteria = filterCriteriaListRef.current[index] && filterCriteriaListRef.current[index].current
+    // skip filters whose component is not mounted (collapsed behind "Show All Filters")
+    if (!criteria || typeof criteria.getValue !== 'function') return
+    let argVal = criteria.getValue()
     if (argVal.type === 0){
       queryData.data.baseArg.push(argVal)
     } else if (argVal.type === 1) {
@@ -46,8 +49,12 @@ const getCurrentSetting = (filterCriteriaListRef, multiFactorRef, filterSectorsI
     }
   })
 
-  queryData.data.Factor_Intersectional_v1 = multiFactorRef.current.getValue()
-  queryData.data.sector_industries = filterSectorsIndustriesRef.current.getValue()
+  if (multiFactorRef.current && typeof multiFactorRef.current.getValue === 'function') {
+    queryData.data.Factor_Intersectional_v1 = multiFactorRef.current.getValue()
+  }
+  if (filterSectorsIndustriesRef.current && typeof filterSectorsIndustriesRef.current.getValue === 'function') {
+    queryData.data.sector_industries = filterSectorsIndustriesRef.current.getValue()
+  }
 
   return queryData
 }
