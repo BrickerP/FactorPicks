@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, createRef } from 'react'
+import React, { useRef, useEffect, createRef, useState } from 'react'
 import Grid from '@mui/material/Grid'
 import { blue } from '@mui/material/colors'
 import Button from '@mui/material/Button'
@@ -13,6 +13,7 @@ import { withPrefix } from 'gatsby'
 import { StockSectorDict, StockIndustryDict} from '../../common/stockdef'
 import { FCDataTemplate } from '../../common/argsList'
 import { queryStocks } from '../../common/queryStocks'
+import { WATCHLIST } from '../../common/watchlist'
 import FilterCriteria from './filterCriteria'
 import ModalWindow from '../modalWindow'
 import NornMinehunter from './nornMinehunter'
@@ -54,7 +55,7 @@ const getCurrentSetting = (filterCriteriaListRef, nornMinehunterRef, multiFactor
 }
 
 // split from FilterContainer to prevent rerender FilterContainer
-const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, nornMinehunterRef, multiFactorRef, filterSectorsIndustriesRef, ResultTableRef, modalWindowRef}) => {
+const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, nornMinehunterRef, multiFactorRef, filterSectorsIndustriesRef, ResultTableRef, modalWindowRef, watchlistRef}) => {
 
   queryStocksRef.current = {
     doQuery: async () => {
@@ -77,6 +78,7 @@ const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, n
           return {
             id: index,
             symbol: value['symbol'],
+            name: value['name'],
             sector: value['sector'] in StockSectorDict ? StockSectorDict[value['sector'].toString()] : StockSectorDict["-1"],
             industry: value['industry'] in StockIndustryDict ? StockIndustryDict[value['industry'].toString()] : StockIndustryDict["-1"],
             marketCap: value['marketCap'],
@@ -94,6 +96,12 @@ const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, n
             tactics: nornMinehunterRef.current.getEnableTacticStrings(),
           }
         })
+
+        // watchlist mode: keep only whitelisted symbols
+        const wl = watchlistRef.current
+        if (wl.mode) {
+          output = output.filter(v => wl.symbols.includes(v.symbol))
+        }
 
         ResultTableRef.current.setTable(output)
 
@@ -139,6 +147,15 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
   const modalWindowRef = useRef({
     popModalWindow: null
   })
+
+  // watchlist mode: default on, shows only whitelisted companies
+  const watchlistRef = useRef({
+    mode: true,
+    symbols: WATCHLIST,
+  })
+
+  // toggle rendered label
+  const [watchlistMode, setWatchlistMode] = useState(true)
 
 
   const importSetting = (e) => {
@@ -193,8 +210,15 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
     // componentDidUpdate is here!
     loadingAnimeRef.current.setLoading(false)
 
+    // auto-query the watchlist on first load so the table isn't empty
+    const t = setTimeout(() => {
+      if (queryStocksRef.current && queryStocksRef.current.doQuery) {
+        queryStocksRef.current.doQuery()
+      }
+    }, 300)
+
     return () => {
-      // componentWillUnmount is here!
+      clearTimeout(t)
     }
   }, [])
 
@@ -224,6 +248,14 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
             <div></div>
             <Button variant="contained" style={customTheme.palette.export} onClick={exportSetting}>Export</Button>
             <div></div>
+            <Button variant="contained" color="secondary" onClick={() => {
+              const next = !watchlistRef.current.mode
+              watchlistRef.current.mode = next
+              setWatchlistMode(next)
+              queryStocksRef.current.doQuery()
+            }}>
+              {watchlistMode ? 'Watchlist' : 'All Stocks'}
+            </Button>
             <ThemeProvider theme={createTheme({ palette: { primary: blue } })}>
               <Button className={filterContainerStyle.queryBtn} variant="contained" color="primary" startIcon={<SearchIcon />} onClick={() => {
                 queryStocksRef.current.doQuery()
@@ -233,7 +265,7 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
         </ThemeProvider>
       </div>
       <ModalWindow modalWindowRef={modalWindowRef} />
-      <QueryStocks queryStocksRef={queryStocksRef} loadingAnimeRef={loadingAnimeRef} filterCriteriaListRef={filterCriteriaListRef} ResultTableRef={ResultTableRef} nornMinehunterRef={nornMinehunterRef} multiFactorRef={multiFactorRef} filterSectorsIndustriesRef={filterSectorsIndustriesRef} modalWindowRef={modalWindowRef}/>
+      <QueryStocks queryStocksRef={queryStocksRef} loadingAnimeRef={loadingAnimeRef} filterCriteriaListRef={filterCriteriaListRef} ResultTableRef={ResultTableRef} nornMinehunterRef={nornMinehunterRef} multiFactorRef={multiFactorRef} filterSectorsIndustriesRef={filterSectorsIndustriesRef} modalWindowRef={modalWindowRef} watchlistRef={watchlistRef}/>
     </>
   )
 }

@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react'
 import { useStaticQuery, graphql } from 'gatsby'
 import Img from 'gatsby-image'
 import { DataGrid } from '@mui/x-data-grid'
+import Tooltip from '@mui/material/Tooltip'
 import { isMobile } from 'react-device-detect'
 
 import { convertKMBT } from '../../common/utils'
@@ -12,6 +13,21 @@ import { ColorPercentField, YahooFinanceUrl } from '../../common/dataGridUtil'
 
 import resultTableStyle from './resultTable.module.scss'
 import '../muiTablePagination.css'
+
+// plain-language explanations for the core factor columns
+const FACTOR_HINTS = {
+  ROE: '净资产收益率：公司用股东的钱赚钱的能力，越高越好（>15% 优秀）',
+  PEG: '市盈率÷盈利增速：<1 = 便宜又有成长；>2 = 偏贵',
+  FCFFEV: '自由现金流÷企业价值：公司真实赚钱能力相对估值，越高越便宜',
+  multiFactor: '加权综合排名分（ROE+FCFF/EV+PEG 等，按你设的权重），越高越好',
+  marketCap: '公司总市值，单位 B=十亿',
+}
+
+const withHint = (field, label) => {
+  const hint = FACTOR_HINTS[field]
+  if (!hint) return label
+  return <Tooltip arrow title={<span style={{ fontSize: '13px' }}>{hint}</span>}><span>{label}</span></Tooltip>
+}
 
 const ResultTable = ({ResultTableRef}) => {
 
@@ -135,22 +151,25 @@ const ResultTable = ({ResultTableRef}) => {
       let tempHideColState = hideColState
       tempHideColState[param['field']] = !param['isVisible']
       setHideColState(tempHideColState)
-    }}/>
+    }}
+      sortModel={[{ field: 'multiFactor', sort: 'desc' }]}
+    />
   }
 
   const tableHeaderTemplate = [
     { field: 'symbol', headerName: 'Symbol', width: 130, hide: 'symbol' in hideColState? hideColState['symbol'] : false },
-    { field: 'sector', headerName: 'Sector', width: 155, hide: 'sector' in hideColState ? hideColState['sector'] : isMobile },
-    { field: 'industry', headerName: 'Industry', width: 255, hide: 'industry' in hideColState ? hideColState['industry'] : isMobile },
+    { field: 'name', headerName: 'Name', width: 200, hide: 'name' in hideColState ? hideColState['name'] : false },
+    { field: 'sector', headerName: 'Sector', width: 155, hide: 'sector' in hideColState ? hideColState['sector'] : true },
+    { field: 'industry', headerName: 'Industry', width: 255, hide: 'industry' in hideColState ? hideColState['industry'] : true },
     {
       field: 'marketCap',
-      headerName: 'Market Cap',
+      headerName: withHint('marketCap', 'Market Cap'),
       width: 150,
       type: 'number',
       renderCell: (params) => (
         <span>{(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN" : convertKMBT(params.value, 2)}</span>
       ),
-      hide: 'marketCap' in hideColState ? hideColState['marketCap'] : isMobile
+      hide: 'marketCap' in hideColState ? hideColState['marketCap'] : false
     },
     {
       field: 'PE',
@@ -160,11 +179,11 @@ const ResultTable = ({ResultTableRef}) => {
       renderCell: (params) => (
         <span>{(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN" : params.value.toFixed(2)}</span>
       ),
-      hide: 'PE' in hideColState ? hideColState['PE'] : false
+      hide: 'PE' in hideColState ? hideColState['PE'] : true
     },
     {
       field: 'PEG',
-      headerName: 'PEG',
+      headerName: withHint('PEG', 'PEG'),
       width: 110,
       type: 'number',
       renderCell: (params) => (
@@ -174,7 +193,7 @@ const ResultTable = ({ResultTableRef}) => {
     },
     {
       field: 'FCFFEV',
-      headerName: 'FCFF/EV',
+      headerName: withHint('FCFFEV', 'FCFF/EV'),
       width: 120,
       type: 'number',
       renderCell: (params) => (
@@ -184,7 +203,7 @@ const ResultTable = ({ResultTableRef}) => {
     },
     {
       field: 'ROE',
-      headerName: 'ROE',
+      headerName: withHint('ROE', 'ROE'),
       width: 110,
       type: 'number',
       renderCell: (params) => (
@@ -200,7 +219,7 @@ const ResultTable = ({ResultTableRef}) => {
       renderCell: (params) => (
         <span>{(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN" : params.value.toFixed(2)}</span>
       ),
-      hide: 'PB' in hideColState ? hideColState['PB'] : false
+      hide: 'PB' in hideColState ? hideColState['PB'] : true
     },
     {
       field: 'price',
@@ -210,9 +229,9 @@ const ResultTable = ({ResultTableRef}) => {
       renderCell: (params) => (
         <span>{(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN" : params.value.toFixed(2)}</span>
       ),
-      hide: 'price' in hideColState ? hideColState['price'] : false
+      hide: 'price' in hideColState ? hideColState['price'] : true
     },
-    ColorPercentField('change', 'Change', 130, 2, 'change' in hideColState ? hideColState['change'] : false, 700),
+    ColorPercentField('change', 'Change', 130, 2, 'change' in hideColState ? hideColState['change'] : true, 700),
     {
       field: 'volume',
       headerName: 'Volume',
@@ -221,7 +240,7 @@ const ResultTable = ({ResultTableRef}) => {
       renderCell: (params) => (
         <span>{(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN" : convertKMBT(params.value, 2)}</span>
       ),
-      hide: 'volume' in hideColState ? hideColState['volume'] : isMobile
+      hide: 'volume' in hideColState ? hideColState['volume'] : true
     },
     {
       field: 'beneish_score',
@@ -264,11 +283,11 @@ const ResultTable = ({ResultTableRef}) => {
           <span style={{ fontSize: 18 }}>({(params.value === "NaN" || params.value === "Infinity" || params.value === -Number.MAX_VALUE) ? "NaN"  : params.value + "%"})</span>
         </div>
       ), 
-      hide: 'risk' in  hideColState? hideColState['risk'] : false
+      hide: 'risk' in  hideColState? hideColState['risk'] : true
     },
     { 
       field: 'multiFactor', 
-      headerName: 'Mulit-Factor', 
+      headerName: withHint('multiFactor', 'Rank'), 
       width: 160, 
       type: 'number',
       renderCell: (params) => (

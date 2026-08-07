@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, createRef } from 'react'
 import TextField from '@mui/material/TextField'
+import Button from '@mui/material/Button'
 import Link from '@mui/material/Link'
 import shortid from 'shortid'
 
@@ -77,6 +78,16 @@ const MultiFactor = ({ multiFactorRef }) => {
 
   const [weightListNode, setWeightListNode] = useState(genWeightListField(MFDataTemplate.weights))
 
+  // one-click preset: rank by ROE + FCFF/EV + PEG (Cheap+Quality)
+  const applyPreset = (presetWeights) => {
+    const next = MFDataTemplate.weights.map((w, i) => {
+      const v = presetWeights[w.name] !== undefined ? presetWeights[w.name] : '0'
+      weightListRef.current[i].current = { value: v }
+      return { ...w, val: v }
+    })
+    setWeightListNode(genWeightListField(next))
+  }
+
   const display_name = 'Multi-Factor Intersectional Model'
 
   useEffect(() => {
@@ -88,13 +99,23 @@ const MultiFactor = ({ multiFactorRef }) => {
   }, [])
 
   return (
-    <div className={multiFactorStyle.container}>
+      <div className={multiFactorStyle.container}>
       <div>
         <NoMaxWidthTooltip arrow title={<span style={{ fontSize: '14px', lineHeight: '24px', whiteSpace: 'pre-line' }}>{MFNote}</span>} >
           <Link href={MFUrl} target="_blank" rel="noreferrer noopener">
             <span className={multiFactorStyle.displayName + ' ' + commonStyle.comicFont}>{display_name}</span>
           </Link>
         </NoMaxWidthTooltip>
+      </div>
+      <div>
+        <Button variant="contained" size="small" color="primary" style={{ margin: '4px 8px' }}
+          onClick={() => applyPreset({
+            ROE_w: '1.0',
+            'FCFF/EV_w': '1.0',
+            PEG_w: '1.0',
+          })}>
+          Preset: Cheap+Quality (ROE+FCFF/EV+PEG)
+        </Button>
       </div>
       <div className={multiFactorStyle.weightBlock}>
         {weightListNode}

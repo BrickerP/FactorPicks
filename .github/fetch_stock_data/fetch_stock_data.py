@@ -298,7 +298,9 @@ def get_stock_base_info(symbol):
         # dividend %: yfinance dividendYield is a decimal (e.g. 0.0072). Keep as decimal.
         sector_name = info.get("sector")
         industry_name = info.get("industry")
+        company_name = info.get("shortName") or info.get("longName") or symbol
         stat = {
+            "name": company_name,
             "sector": SECTOR_INDEX.get(sector_name, "-1"),
             "industry": INDUSTRY_INDEX.get(industry_name, "-1"),
             "P/E": pct_decimal(pe),

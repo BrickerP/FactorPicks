@@ -287,6 +287,7 @@ export function queryStocks(data, queryData) {
   const output = filtered.map((row, index) => ({
     id: index,
     symbol: row.symbol,
+    name: row.name,
     sector: row.sector,
     industry: row.industry,
     marketCap: row['Market Cap'] === '-' || row['Market Cap'] == null ? -Number.MAX_VALUE : toNumber(row['Market Cap']),
