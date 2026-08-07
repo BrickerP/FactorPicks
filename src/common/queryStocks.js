@@ -133,7 +133,11 @@ function computeMultiFactorScores(data, weights) {
         case 'S/P_w': val = row['P/S'] ? 1 / toNumber(row['P/S']) : null; break
         case 'FCF/P_w': val = row['P/FCF'] ? 1 / toNumber(row['P/FCF']) : null; break
         case 'FCFF/EV_w': val = toNumber(row['FCFF/EV']); break
-        case 'PEG_w': val = row['PEG'] ? -toNumber(row['PEG']) : null; break
+        case 'PEG_w': {
+          const peg = toNumber(row['PEG'])
+          val = peg != null ? -peg : null
+          break
+        }
         case 'ROA_w': val = toNumber(row['ROA']); break
         case 'ROE_w': val = toNumber(row['ROE']); break
         case 'ROI_w': val = toNumber(row['ROI']); break
@@ -168,17 +172,18 @@ function computeMultiFactorScores(data, weights) {
   // z-score each factor (skip factors where fewer than 10 valid values)
   const zscores = {}
   factorNames.forEach(name => {
+    zscores[name] = {}
     const vals = {}
     const list = []
     symbols.forEach(sym => {
       const v = raw[name][sym]
       if (v != null) { vals[sym] = v; list.push(v) }
     })
-    if (list.length < 10) { zscores[name] = {}; return }
+    if (list.length < 10) { return }
     const mean = list.reduce((a, b) => a + b, 0) / list.length
     const varSum = list.reduce((a, b) => a + (b - mean) ** 2, 0) / list.length
     const std = Math.sqrt(varSum)
-    if (!std || std === 0) { zscores[name] = {}; return }
+    if (!std || std === 0) { return }
     Object.entries(vals).forEach(([sym, v]) => {
       zscores[name][sym] = (v - mean) / std
     })
