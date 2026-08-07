@@ -5,6 +5,7 @@ export const FCDataTemplate = [
     display_name: "Market Cap",
     type: 0,
     tooltip: "Market capitalization",
+    core: true,
     args_items: ["Any (> $50 mln)", "$50 mln ~ $300 mln", "$300 mln ~ $2 bln", "$2 bln ~ $10 bln", "$10 bln ~ $200 bln", "> $300 mln", "> $2 bln", "> $10 bln", "> $200 bln", "< $300 mln", "< $2 bln", "< $10 bln", "< $200 bln"],
     default_index: 6
   },
@@ -31,6 +32,7 @@ export const FCDataTemplate = [
     display_name: "ROE",
     type: 0,
     tooltip: "Return on Equity (ttm)",
+    core: true,
     args_items: ["Any", "> 5%", "> 10%", "> 15%", "> 20%", "> 25%", "> 30%", "< -5%", "< -10%", "< -15%", "< -20%", "< -25%", "< -30%"],
     //default_index: 3
     default_index: 0
@@ -49,6 +51,7 @@ export const FCDataTemplate = [
     display_name: "P/E Ratio",
     type: 0,
     tooltip: "Price to Earnings (ttm)",
+    core: true,
     args_items: ["Any", "< 5", "< 10", "< 15", "< 20", "< 25", "< 30", "< 40", "< 50", "> 5", "> 10", "> 15", "> 20", "> 25", "> 30", "> 40", "> 50"],
     default_index: 3
   },
@@ -127,6 +130,7 @@ export const FCDataTemplate = [
     display_name: "PEG Ratio",
     type: 0,
     tooltip: "Price to Earnings to Growth",
+    core: true,
     args_items: ["Any", "< 1", "< 2", "< 3", "> 1", "> 2", "> 3"],
     //default_index: 1
     default_index: 0
@@ -163,6 +167,7 @@ export const FCDataTemplate = [
     display_name: "P/FCF",
     type: 0,
     tooltip: "Price to Free Cash Flow (ttm)",
+    core: true,
     args_items: ["Any", "< 5", "< 10", "< 15", "< 20", "< 25", "< 30", "< 40", "< 50", "> 5", "> 10", "> 15", "> 20", "> 25", "> 30", "> 40", "> 50"],
     //default_index: 3
     default_index: 0
@@ -172,6 +177,7 @@ export const FCDataTemplate = [
     display_name: "FCFF/EV",
     type: 0,
     tooltip: "Free Cash Flow yield on Enterprise Value (ttm)",
+    core: true,
     args_items: ["Any", "> 1%", "> 2%", "> 3%", "> 4%", "> 5%", "> 6%", "> 8%", "> 10%", "< 0%", "< -1%", "< -2%"],
     default_index: 0
   },

@@ -16,7 +16,6 @@ import { queryStocks } from '../../common/queryStocks'
 import { WATCHLIST } from '../../common/watchlist'
 import FilterCriteria from './filterCriteria'
 import ModalWindow from '../modalWindow'
-import NornMinehunter from './nornMinehunter'
 import MultiFactor from './multiFactor'
 import FilterSectorsIndustries from './filterSectorsIndustries'
 
@@ -33,7 +32,7 @@ const customTheme = createTheme({
   },
 })
 
-const getCurrentSetting = (filterCriteriaListRef, nornMinehunterRef, multiFactorRef, filterSectorsIndustriesRef)=>{
+const getCurrentSetting = (filterCriteriaListRef, multiFactorRef, filterSectorsIndustriesRef)=>{
 
   let queryData = { data: { baseArg: [], advArg: [], NornMinehunter: {}, Factor_Intersectional_v1: {}, sector_industries: {} } }
 
@@ -47,7 +46,6 @@ const getCurrentSetting = (filterCriteriaListRef, nornMinehunterRef, multiFactor
     }
   })
 
-  queryData.data.NornMinehunter = nornMinehunterRef.current.getValue()
   queryData.data.Factor_Intersectional_v1 = multiFactorRef.current.getValue()
   queryData.data.sector_industries = filterSectorsIndustriesRef.current.getValue()
 
@@ -55,14 +53,14 @@ const getCurrentSetting = (filterCriteriaListRef, nornMinehunterRef, multiFactor
 }
 
 // split from FilterContainer to prevent rerender FilterContainer
-const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, nornMinehunterRef, multiFactorRef, filterSectorsIndustriesRef, ResultTableRef, modalWindowRef, watchlistRef}) => {
+const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, multiFactorRef, filterSectorsIndustriesRef, ResultTableRef, modalWindowRef, watchlistRef}) => {
 
   queryStocksRef.current = {
     doQuery: async () => {
 
       loadingAnimeRef.current.setLoading(true)
 
-      let queryData = getCurrentSetting(filterCriteriaListRef, nornMinehunterRef, multiFactorRef, filterSectorsIndustriesRef)
+      let queryData = getCurrentSetting(filterCriteriaListRef, multiFactorRef, filterSectorsIndustriesRef)
       console.log(queryData)
 
       try {
@@ -93,7 +91,7 @@ const QueryStocks = ({ queryStocksRef, loadingAnimeRef, filterCriteriaListRef, n
             beneish_score: value['beneish_score'],
             risk: value['risk'],
             multiFactor: value['multiFactor'],
-            tactics: nornMinehunterRef.current.getEnableTacticStrings(),
+            tactics: '',
           }
         })
 
@@ -132,10 +130,6 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
     getValue: null
   })
 
-  const nornMinehunterRef = useRef({
-    getValue: null
-  })
-
   const multiFactorRef = useRef({
     getValue: null
   })
@@ -156,6 +150,7 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
 
   // toggle rendered label
   const [watchlistMode, setWatchlistMode] = useState(true)
+  const [showAllFilters, setShowAllFilters] = useState(false)
 
 
   const importSetting = (e) => {
@@ -165,7 +160,6 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
         return function (e) {
           let data = JSON.parse(e.target.result)
 
-          nornMinehunterRef.current.setValue(data['data']['NornMinehunter'])
           multiFactorRef.current.setValue(data['data']['Factor_Intersectional_v1'])
           filterSectorsIndustriesRef.current.setValue(data['data']['sector_industries'])
 
@@ -194,7 +188,7 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
 
   const exportSetting = (e) => {
 
-    let queryData = getCurrentSetting(filterCriteriaListRef, nornMinehunterRef, multiFactorRef, filterSectorsIndustriesRef)
+    let queryData = getCurrentSetting(filterCriteriaListRef, multiFactorRef, filterSectorsIndustriesRef)
 
     var aTag = document.createElement('a')
     var blob = new Blob([JSON.stringify(queryData)])
@@ -228,12 +222,20 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
         <Grid container spacing={1}>
           {
             FCDataTemplate.map((value, index) => {
+              // collapse: show only core filters by default, "More Filters" reveals the rest
+              if (!showAllFilters && !value.core) return null
               return <FilterCriteria key={shortid.generate()} filterCriteriaRef={filterCriteriaListRef.current[index]} dataTemplate={value} />
             })
           }
         </Grid>
+        <div className={filterContainerStyle.cmdPanel}>
+          <div></div>
+          <Button size="small" onClick={() => setShowAllFilters(!showAllFilters)}>
+            {showAllFilters ? 'Hide Advanced Filters' : 'Show All Filters (' + FCDataTemplate.filter(v => !v.core).length + ' more)'}
+          </Button>
+          <div></div>
+        </div>
         <FilterSectorsIndustries filterSectorsIndustriesRef={filterSectorsIndustriesRef} />
-        <NornMinehunter nornMinehunterRef={nornMinehunterRef}/>
         <MultiFactor multiFactorRef={multiFactorRef} />
         <ThemeProvider theme={customTheme}>
           <div className={filterContainerStyle.cmdPanel}>
@@ -265,7 +267,7 @@ const FilterContainer = ({ ResultTableRef, loadingAnimeRef }) => {
         </ThemeProvider>
       </div>
       <ModalWindow modalWindowRef={modalWindowRef} />
-      <QueryStocks queryStocksRef={queryStocksRef} loadingAnimeRef={loadingAnimeRef} filterCriteriaListRef={filterCriteriaListRef} ResultTableRef={ResultTableRef} nornMinehunterRef={nornMinehunterRef} multiFactorRef={multiFactorRef} filterSectorsIndustriesRef={filterSectorsIndustriesRef} modalWindowRef={modalWindowRef} watchlistRef={watchlistRef}/>
+      <QueryStocks queryStocksRef={queryStocksRef} loadingAnimeRef={loadingAnimeRef} filterCriteriaListRef={filterCriteriaListRef} ResultTableRef={ResultTableRef} multiFactorRef={multiFactorRef} filterSectorsIndustriesRef={filterSectorsIndustriesRef} modalWindowRef={modalWindowRef} watchlistRef={watchlistRef}/>
     </>
   )
 }
