@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { queryStocks } from './lib/queryStocks'
 import { MFDataTemplate } from './lib/mf'
-import { StockSectorDict, StockIndustryDict } from './lib/stockdef'
 import { WATCHLIST } from './lib/watchlist'
 
 const CORE_FACTORS = ['FCFF/EV_w', 'PEG_w', 'ROE_w']
@@ -126,8 +125,6 @@ function App() {
     { key: 'multiFactor', label: 'Rank', cls: 'num', fmt: fmtNum },
   ]
 
-  const sectors = new Set(rows.map(r => r.sector).filter(Boolean))
-
   return (
     <div className="wrap">
       <header className="top">
@@ -162,7 +159,6 @@ function App() {
         </div>
         <div className="actions">
           <span className="muted">{rows.length} stocks</span>
-          {sectors.size > 0 && <span className="muted">{sectors.size} sectors</span>}
           <button className="btn primary" onClick={() => doQuery()}>Apply</button>
         </div>
       </section>
