@@ -6,6 +6,7 @@
 // TSM and DUOL are added to the data pipeline (not S&P500 constituents).
 export const WATCHLIST = [
   'META',
+  'GOOGL',
   'UNH',
   'NVDA',
   'PG',

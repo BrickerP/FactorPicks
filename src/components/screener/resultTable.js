@@ -142,6 +142,7 @@ const ResultTable = ({ResultTableRef}) => {
   }
 
   const [hideColState, setHideColState] = useState({})
+  const [sortModel, setSortModel] = useState([{ field: 'multiFactor', sort: 'desc' }])
 
   const renderTable = (data)=>{
     // workaround When the vertical scrollbar appears, the horizontal scrollbar is shown as well
@@ -152,7 +153,7 @@ const ResultTable = ({ResultTableRef}) => {
       tempHideColState[param['field']] = !param['isVisible']
       setHideColState(tempHideColState)
     }}
-      sortModel={[{ field: 'multiFactor', sort: 'desc' }]}
+      sortModel={sortModel} onSortModelChange={setSortModel}
     />
   }
 
