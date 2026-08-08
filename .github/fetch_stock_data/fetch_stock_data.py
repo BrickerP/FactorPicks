@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import time
+import requests
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
