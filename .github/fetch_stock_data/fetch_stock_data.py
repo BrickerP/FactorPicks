@@ -291,7 +291,7 @@ def compute_hl_offsets(hist_data):
 
 def get_stock_base_info(symbol):
     """Pull fundamentals from yfinance Ticker.info. Returns dict matching the
-    original Norn stat.json schema keys, or None on failure."""
+    original stat.json schema keys, or None on failure."""
     try:
         stock = yf.Ticker(symbol)
         info = stock.info

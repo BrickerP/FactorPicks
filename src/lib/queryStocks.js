@@ -1,13 +1,11 @@
 import { MFDataTemplate } from './mf'
 
 // ============================================================
-// Pure-frontend query engine replacing the private Norn backend.
-// Operates directly on the stat.json dataset ({symbol: {fields...}}).
+// Pure-frontend query engine operating directly on the stat.json
+// dataset ({symbol: {fields...}}).
 //
-// scope: supports the baseArg / advArg interval filters, sector &
-//        industry selection, a simplified multi-factor score, and a
-//        simplified risk score (replacing the NornMinehunter master
-//        strategy engine, which lived server-side).
+// scope: interval filters, sector & industry selection, a
+//        multi-factor z-score ranking, and a simplified risk score.
 // ============================================================
 
 const NUM_FIELDS = new Set([
@@ -217,8 +215,8 @@ function computeMultiFactorScores(data, weights) {
 }
 
 // ---------------- Simplified risk score ----------------
-// Replaces the NornMinehunter master-strategy engine. Lower = better (0-100).
-// Heuristic combines profitability, leverage, valuation & stability.
+// Lower = better (0-100). Heuristic combining profitability,
+// leverage, valuation & stability.
 function computeRiskScores(data) {
   const out = {}
   Object.keys(data).forEach(sym => {
@@ -245,7 +243,6 @@ export function queryStocks(data, queryData) {
   const baseArg = q.baseArg || []
   const advArg = q.advArg || []
   const sectorIndustries = q.sector_industries || {}
-  const nm = q.NornMinehunter || {}
   const mf = q.Factor_Intersectional_v1 || {}
 
   const rows = Object.keys(data).map(symbol => ({ symbol, ...data[symbol] }))
@@ -275,19 +272,6 @@ export function queryStocks(data, queryData) {
   }
   if (sectorIndustries.industries && sectorIndustries.industries.length) {
     filtered = filtered.filter(row => sectorIndustries.industries.includes(String(row.industry)))
-  }
-
-  // NornMinehunter risk score range filter (simplified risk score)
-  if (nm && (nm.from !== '' && nm.from != null || nm.end !== '' && nm.end != null)) {
-    const from = parseFloat(nm.from)
-    const end = parseFloat(nm.end)
-    filtered = filtered.filter(row => {
-      const score = riskScores ? riskScores[row.symbol] : null
-      if (score == null) return false
-      if (!Number.isNaN(from) && score < from) return false
-      if (!Number.isNaN(end) && score > end) return false
-      return true
-    })
   }
 
   const output = filtered.map((row, index) => ({

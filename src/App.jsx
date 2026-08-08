@@ -128,7 +128,7 @@ function App() {
   return (
     <div className="wrap">
       <header className="top">
-        <h1>NornScreener</h1>
+        <h1>FactorPicks</h1>
         <button className="btn" onClick={toggleMode}>
           {mode === 'watchlist' ? `Watchlist (${WATCHLIST.length})` : 'All Stocks'}
         </button>
@@ -198,7 +198,7 @@ function App() {
       </section>
 
       <footer className="foot">
-        <a href="https://github.com/BrickerP/Norn-StockScreener" target="_blank" rel="noreferrer noopener">Source</a>
+        <a href="https://github.com/BrickerP/FactorPicks" target="_blank" rel="noreferrer noopener">Source</a>
         <span className="muted">Data: yfinance · S&P 500 · updated daily</span>
       </footer>
     </div>

@@ -1,6 +1,6 @@
 {
-  "name": "norn-screener",
-  "description": "NornScreener - minimal US stock factor ranking dashboard",
+  "name": "factor-picks",
+  "description": "FactorPicks - minimal US stock factor ranking dashboard",
   "version": "2.0.0",
   "private": true,
   "type": "module",
