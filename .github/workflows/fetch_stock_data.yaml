@@ -26,10 +26,10 @@ jobs:
       run: |
         python -m pip install -r ./.github/fetch_stock_data/requirements.txt
 
-    - name: Fetch stock data (yfinance -> static/stat.json)
+    - name: Fetch stock data (yfinance -> public/stat.json)
       run: |
         python ./.github/fetch_stock_data/fetch_stock_data.py
-        ls -la static/ && du -sh static/stat.json
+        ls -la public/ && du -sh public/stat.json
 
     - name: Set up Node
       uses: actions/setup-node@v4
@@ -38,14 +38,14 @@ jobs:
 
     - name: Install frontend deps
       run: |
-        npm install --legacy-peer-deps
+        npm install
 
-    - name: Gatsby build
+    - name: Vite build
       run: |
-        npx gatsby build --prefix-paths
+        npm run build
 
     - name: Deploy to gh-pages
       uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./public
+        publish_dir: ./dist

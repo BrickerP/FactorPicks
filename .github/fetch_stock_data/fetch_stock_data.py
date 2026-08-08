@@ -36,7 +36,7 @@ def load_industry_index():
     """Build industry name -> index map from the front-end StockIndustryDict."""
     global INDUSTRY_INDEX
     root = pathlib.Path(__file__).parent.resolve()
-    stockdef_path = root / ".." / ".." / "src" / "common" / "stockdef.js"
+    stockdef_path = root / ".." / ".." / "src" / "lib" / "stockdef.js"
     try:
         content = stockdef_path.read_text(encoding="utf-8")
         start = content.find("StockIndustryDict")
@@ -120,7 +120,7 @@ def get_stock_universe():
 
     # repo-cached fallback list (avoids network entirely when present)
     root = pathlib.Path(__file__).parent.resolve()
-    cache_file = root / ".." / ".." / "static" / "stock_symbols.txt"
+    cache_file = root / ".." / ".." / "public" / "stock_symbols.txt"
     if cache_file.exists():
         cached = [s.strip() for s in cache_file.read_text(encoding="utf-8").splitlines() if s.strip()]
         if cached:
@@ -377,8 +377,8 @@ def parse_stock_hl_pv(stock_data):
 
 def main():
     root = pathlib.Path(__file__).parent.resolve()
-    # stat.json is consumed by the front-end from Gatsby's static/ dir
-    stock_folder_path = root / ".." / ".." / "static"
+    # stat.json is consumed by the front-end from Vite's public/ dir
+    stock_folder_path = root / ".." / ".." / "public"
     if not os.path.exists(stock_folder_path):
         os.makedirs(stock_folder_path)
 
