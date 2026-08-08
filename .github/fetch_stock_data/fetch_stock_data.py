@@ -83,6 +83,68 @@ def pct_decimal(v):
     return fmt_num(v)
 
 
+def clean_ratio(v, bounds=(-10, 10)):
+    """Sanitize a yfinance ratio. Values outside a sane range (e.g. negative
+    equity making ROE explode to 58x) are treated as missing."""
+    f = fmt_num(v)
+    if f == "-":
+        return "-"
+    lo, hi = bounds
+    if f < lo or f > hi:
+        return "-"
+    return f
+
+
+def clean_roe(v, debt_eq=None):
+    """ROE: a company with negative equity or a turnaround can produce
+    nonsensical values (e.g. 58x). Cap at a believable max and floor at a
+    believable min; keep only -2.0..3.0 (i.e. -200%..300%).
+
+    Negative stockholders' equity makes yfinance's returnOnEquity meaningless
+    (it usually comes back as a large positive number). debtToEquity in that
+    case also explodes (e.g. 57334 for a firm with tiny negative equity).
+    A firm with Debt/Eq > 500 AND ROE > 100% is almost certainly in that
+    state, so null the ROE."""
+    f = clean_ratio(v, bounds=(-2.0, 3.0))
+    if f == "-":
+        return "-"
+    de = fmt_num(debt_eq)
+    if de != "-" and de > 500 and f > 1.0:
+        return "-"
+    return f
+
+
+def clean_pe(v):
+    """P/E: 0 or negative is missing (loss-making or bad data). Cap upper at 200."""
+    f = fmt_num(v)
+    if f == "-":
+        return "-"
+    if f <= 0 or f > 200:
+        return "-"
+    return f
+
+
+def clean_fcff_ev(v):
+    """FCFF/EV above 30% is almost certainly a data error (a firm rarely
+    throws off a third of its enterprise value in FCF). Treat as missing."""
+    f = fmt_num(v)
+    if f == "-":
+        return "-"
+    if f < -0.5 or f > 0.30:
+        return "-"
+    return f
+
+
+def clean_peg(v):
+    """PEG above 10 or negative is not actionable; treat as missing."""
+    f = fmt_num(v)
+    if f == "-":
+        return "-"
+    if f < 0 or f > 10:
+        return "-"
+    return f
+
+
 NASDAQ_TRADER_BASE = "https://www.nasdaqtrader.com/dynamic/SymDir/"
 
 
@@ -304,35 +366,35 @@ def get_stock_base_info(symbol):
             "name": company_name,
             "sector": SECTOR_INDEX.get(sector_name, "-1"),
             "industry": INDUSTRY_INDEX.get(industry_name, "-1"),
-            "P/E": pct_decimal(pe),
+            "P/E": clean_pe(pe),
             "P/B": pct_decimal(info.get("priceToBook")),
             "Dividend %": pct_decimal(div_yield),
             "Market Cap": mc if mc else "-",
-            "ROE": pct_decimal(info.get("returnOnEquity")),
-            "ROA": pct_decimal(info.get("returnOnAssets")),
-            "ROI": pct_decimal(info.get("returnOnCapitalEmployed") or info.get("returnOnEquity")),
+            "ROE": clean_roe(info.get("returnOnEquity"), info.get("debtToEquity")),
+            "ROA": clean_ratio(info.get("returnOnAssets"), bounds=(-1.0, 2.0)),
+            "ROI": clean_ratio(info.get("returnOnCapitalEmployed") or info.get("returnOnEquity"), bounds=(-1.0, 2.0)),
             "P/C": "-",
             "P/S": pct_decimal(info.get("priceToSalesTrailing12Months")),
             "Target Price": fmt_num(info.get("targetMeanPrice")),
             "Short Float": pct_decimal(info.get("shortPercentOfFloat")),
-            "Forward P/E": pct_decimal(forward_pe),
+            "Forward P/E": clean_pe(forward_pe),
             "Insider Trans": "-",
-            "PEG": pct_decimal(info.get("pegRatio")),
+            "PEG": clean_peg(info.get("pegRatio")),
             "EPS this Y": pct_decimal(info.get("earningsGrowth")),
             "Inst Trans": "-",
             "EPS next Y_%": pct_decimal(info.get("earningsQuarterlyGrowth")),
             "Quick Ratio": pct_decimal(info.get("quickRatio")),
-            "Gross Margin": pct_decimal(info.get("grossMargins")),
+            "Gross Margin": clean_ratio(info.get("grossMargins"), bounds=(-1.0, 1.0)),
             "Current Ratio": pct_decimal(info.get("currentRatio")),
-            "Oper. Margin": pct_decimal(info.get("operatingMargins")),
-            "Debt/Eq": pct_decimal(info.get("debtToEquity")),
+            "Oper. Margin": clean_ratio(info.get("operatingMargins"), bounds=(-1.0, 1.0)),
+            "Debt/Eq": clean_ratio(info.get("debtToEquity"), bounds=(0, 500)),
             "EPS Q/Q": pct_decimal(info.get("earningsQuarterlyGrowth")),
-            "Profit Margin": pct_decimal(info.get("profitMargins")),
+            "Profit Margin": clean_ratio(info.get("profitMargins"), bounds=(-1.0, 1.0)),
             "LT Debt/Eq": "-",
             "Sales Q/Q": pct_decimal(info.get("revenueGrowth")),
             "Recom": fmt_num(recom),
             "P/FCF": p_fcf,
-            "FCFF/EV": fcff_ev,
+            "FCFF/EV": clean_fcff_ev(fcff_ev),
             "beneish": "-",
         }
 

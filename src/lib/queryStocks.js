@@ -184,8 +184,14 @@ function computeMultiFactorScores(data, weights) {
     const varSum = list.reduce((a, b) => a + (b - mean) ** 2, 0) / list.length
     const std = Math.sqrt(varSum)
     if (!std || std === 0) { return }
+    // Winsorize raw values to ±3 std before computing scores, so one extreme
+    // outlier cannot dominate the whole factor. The mean/std themselves are
+    // computed on the raw distribution (robust enough for our universe size).
+    const capLo = mean - 3 * std
+    const capHi = mean + 3 * std
     Object.entries(vals).forEach(([sym, v]) => {
-      zscores[name][sym] = (v - mean) / std
+      const clipped = Math.max(capLo, Math.min(capHi, v))
+      zscores[name][sym] = (clipped - mean) / std
     })
   })
 
