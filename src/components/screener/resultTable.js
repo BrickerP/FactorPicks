@@ -25,8 +25,11 @@ const FACTOR_HINTS = {
 
 const withHint = (field, label) => {
   const hint = FACTOR_HINTS[field]
-  if (!hint) return label
-  return <Tooltip arrow title={<span style={{ fontSize: '13px' }}>{hint}</span>}><span>{label}</span></Tooltip>
+  if (!hint) return { headerName: label }
+  return {
+    headerName: label,
+    renderHeader: () => <Tooltip arrow title={<span style={{ fontSize: '13px' }}>{hint}</span>}><span>{label}</span></Tooltip>,
+  }
 }
 
 const ResultTable = ({ResultTableRef}) => {
@@ -134,7 +137,7 @@ const ResultTable = ({ResultTableRef}) => {
   // ResultTableRef API
   ResultTableRef.current = {
     setTable: (data)=>{
-      setTableData(renderTable(data))
+      setTableData(data)
       containerRef.current.scrollIntoView({
         behavior: "smooth",
       })
@@ -144,19 +147,6 @@ const ResultTable = ({ResultTableRef}) => {
   const [hideColState, setHideColState] = useState({})
   const [sortModel, setSortModel] = useState([{ field: 'multiFactor', sort: 'desc' }])
 
-  const renderTable = (data)=>{
-    // workaround When the vertical scrollbar appears, the horizontal scrollbar is shown as well
-    // root cause: OSX/Xubuntu: 15px (default scrollbarSize value), Windows: 17px
-    // https://gitmemory.com/issue/mui-org/material-ui-x/660/737896038
-    return <DataGrid rows={data} columns={tableHeaderTemplate} scrollbarSize={17} components={{ NoRowsOverlay: DefaultDataGridTable, }} disableSelectionOnClick onColumnVisibilityChange={(param) => {
-      let tempHideColState = hideColState
-      tempHideColState[param['field']] = !param['isVisible']
-      setHideColState(tempHideColState)
-    }}
-      sortModel={sortModel} onSortModelChange={setSortModel}
-    />
-  }
-
   const tableHeaderTemplate = [
     { field: 'symbol', headerName: 'Symbol', width: 130, hide: 'symbol' in hideColState? hideColState['symbol'] : false },
     { field: 'name', headerName: 'Name', width: 200, hide: 'name' in hideColState ? hideColState['name'] : false },
@@ -164,7 +154,7 @@ const ResultTable = ({ResultTableRef}) => {
     { field: 'industry', headerName: 'Industry', width: 255, hide: 'industry' in hideColState ? hideColState['industry'] : true },
     {
       field: 'marketCap',
-      headerName: withHint('marketCap', 'Market Cap'),
+      headerName: 'Market Cap', renderHeader: withHint('marketCap').renderHeader,
       width: 150,
       type: 'number',
       renderCell: (params) => (
@@ -184,7 +174,7 @@ const ResultTable = ({ResultTableRef}) => {
     },
     {
       field: 'PEG',
-      headerName: withHint('PEG', 'PEG'),
+      headerName: 'PEG', renderHeader: withHint('PEG').renderHeader,
       width: 110,
       type: 'number',
       renderCell: (params) => (
@@ -194,7 +184,7 @@ const ResultTable = ({ResultTableRef}) => {
     },
     {
       field: 'FCFFEV',
-      headerName: withHint('FCFFEV', 'FCFF/EV'),
+      headerName: 'FCFF/EV', renderHeader: withHint('FCFFEV').renderHeader,
       width: 120,
       type: 'number',
       renderCell: (params) => (
@@ -204,7 +194,7 @@ const ResultTable = ({ResultTableRef}) => {
     },
     {
       field: 'ROE',
-      headerName: withHint('ROE', 'ROE'),
+      headerName: 'ROE', renderHeader: withHint('ROE').renderHeader,
       width: 110,
       type: 'number',
       renderCell: (params) => (
@@ -288,7 +278,7 @@ const ResultTable = ({ResultTableRef}) => {
     },
     { 
       field: 'multiFactor', 
-      headerName: withHint('multiFactor', 'Rank'), 
+      headerName: 'Rank', renderHeader: withHint('multiFactor').renderHeader, 
       width: 160, 
       type: 'number',
       renderCell: (params) => (
@@ -314,12 +304,18 @@ const ResultTable = ({ResultTableRef}) => {
     },
   ]
 
-  const [tableData, setTableData] = useState(renderTable([]))
+  const [tableData, setTableData] = useState([])
   const containerRef = useRef()
 
   return (
     <div className={resultTableStyle.container} ref={containerRef} style={{ height: 640, width: '100%' }}>
-      {tableData}
+      <DataGrid rows={tableData} columns={tableHeaderTemplate} scrollbarSize={17} components={{ NoRowsOverlay: DefaultDataGridTable, }} disableSelectionOnClick onColumnVisibilityChange={(param) => {
+        let tempHideColState = hideColState
+        tempHideColState[param['field']] = !param['isVisible']
+        setHideColState(tempHideColState)
+      }}
+        sortModel={sortModel} onSortModelChange={setSortModel}
+      />
     </div>
   )
 }
