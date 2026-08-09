@@ -8,11 +8,29 @@ import time
 import requests
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 DELAY_TIME_SEC = 0.5
 RETRY_FAILED_DELAY = 10
 RETRY_CNT = 3
+
+DATA_QUALITY_SCHEMA_VERSION = 1
+DATA_SOURCE = "yfinance"
+MIN_SUCCESS_RATE = 0.80
+MIN_CRITICAL_FIELD_COVERAGE = 0.50
+RATE_DECIMAL_PLACES = 6
+RATE_TOLERANCE = 10 ** -RATE_DECIMAL_PLACES
+CRITICAL_FIELDS = (
+    "Close",
+    "name",
+    "sector",
+    "industry",
+    "Market Cap",
+    "P/E",
+    "ROE",
+    "Debt/Eq",
+    "FCFF/EV",
+)
 
 # Sector/Industry name -> index maps, mirroring StockSectorDict/StockIndustryDict
 # in the front-end (src/common/stockdef.js). Unknown names fall back to "-1".
@@ -167,15 +185,23 @@ def _parse_nasdaq_symbols(content, is_nasdaq):
     return symbols
 
 
-def get_stock_universe():
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "-input-symbol-list", dest="input", default="")
+    parser.add_argument(
+        "--check-quality",
+        action="store_true",
+        help="Validate public/data-quality.json without fetching stock data.",
+    )
+    return parser.parse_args()
+
+
+def get_stock_universe(input_symbols=""):
     """Return the list of US stock symbols to scan.
     Priority: CLI arg -> env var -> NASDAQ Trader official symbol directory
     (nasdaq + other exchanges), with a repo-cached fallback."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "-input-symbol-list", dest="input", default="")
-    args, _ = parser.parse_known_args()
-    if args.input:
-        return [s.strip() for s in args.input.split(",") if s.strip()]
+    if input_symbols:
+        return [s.strip() for s in input_symbols.split(",") if s.strip()]
 
     env_list = os.environ.get("STOCK_SYMBOLS", "")
     if env_list:
@@ -438,17 +464,229 @@ def parse_stock_hl_pv(stock_data):
     return output
 
 
+def _is_covered(value):
+    if value is None or value in ("", "-", "-1"):
+        return False
+    if is_float(value) and not math.isfinite(float(value)):
+        return False
+    return True
+
+
+def _rate(numerator, denominator):
+    if denominator == 0:
+        return 0.0
+    return round(numerator / denominator, RATE_DECIMAL_PLACES)
+
+
+def _is_non_negative_int(value):
+    return type(value) is int and value >= 0
+
+
+def _is_rate(value):
+    return (
+        type(value) in (int, float)
+        and math.isfinite(value)
+        and 0 <= value <= 1
+    )
+
+
+def _rate_matches(value, numerator, denominator):
+    return abs(value - _rate(numerator, denominator)) <= RATE_TOLERANCE
+
+
+def build_data_quality(stock_stat, requested, failed_symbols):
+    succeeded = len(stock_stat)
+    coverage = {}
+    for field in CRITICAL_FIELDS:
+        available = sum(
+            1 for stat in stock_stat.values() if _is_covered(stat.get(field))
+        )
+        coverage[field] = {
+            "available": available,
+            "total": succeeded,
+            "rate": _rate(available, succeeded),
+        }
+
+    return {
+        "schemaVersion": DATA_QUALITY_SCHEMA_VERSION,
+        "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": DATA_SOURCE,
+        "requested": requested,
+        "succeeded": succeeded,
+        "failed": len(failed_symbols),
+        "successRate": _rate(succeeded, requested),
+        "coverage": coverage,
+        "failedSymbols": list(failed_symbols),
+    }
+
+
+def write_json(path, value):
+    path.write_text(
+        json.dumps(value, separators=(",", ":"), allow_nan=False),
+        encoding="utf-8",
+    )
+
+
+def validate_data_quality(report):
+    required_fields = {
+        "schemaVersion",
+        "generatedAt",
+        "source",
+        "requested",
+        "succeeded",
+        "failed",
+        "successRate",
+        "coverage",
+        "failedSymbols",
+    }
+    if not isinstance(report, dict):
+        return ["quality report must be an object"]
+
+    missing_fields = sorted(required_fields - report.keys())
+    if missing_fields:
+        return ["missing fields: {fields}".format(fields=", ".join(missing_fields))]
+
+    errors = []
+    try:
+        json.dumps(report, allow_nan=False)
+    except (TypeError, ValueError):
+        errors.append("quality report contains a non-JSON-safe value")
+
+    if report["schemaVersion"] != DATA_QUALITY_SCHEMA_VERSION:
+        errors.append("unsupported schemaVersion")
+    if not isinstance(report["generatedAt"], str) or not report["generatedAt"]:
+        errors.append("generatedAt must be a non-empty string")
+    if report["source"] != DATA_SOURCE:
+        errors.append("unexpected source")
+
+    requested, succeeded, failed = (
+        report["requested"],
+        report["succeeded"],
+        report["failed"],
+    )
+    counts_are_valid = all(
+        _is_non_negative_int(value) for value in (requested, succeeded, failed)
+    )
+    if not counts_are_valid:
+        errors.append("result counts must be non-negative integers")
+    elif requested != succeeded + failed:
+        errors.append("requested must equal succeeded plus failed")
+    elif requested == 0 or succeeded == 0:
+        errors.append("stock result must not be empty")
+
+    success_rate = report["successRate"]
+    if not _is_rate(success_rate):
+        errors.append("successRate must be a finite number between zero and one")
+    elif counts_are_valid and requested > 0:
+        if not _rate_matches(success_rate, succeeded, requested):
+            errors.append("successRate does not match the result counts")
+        if success_rate < MIN_SUCCESS_RATE:
+            errors.append(
+                "successRate {actual:.2%} is below {minimum:.0%}".format(
+                    actual=success_rate,
+                    minimum=MIN_SUCCESS_RATE,
+                )
+            )
+
+    failed_symbols = report["failedSymbols"]
+    if not isinstance(failed_symbols, list) or not all(
+        isinstance(symbol, str) for symbol in failed_symbols
+    ):
+        errors.append("failedSymbols must be a list of strings")
+    elif counts_are_valid and len(failed_symbols) != failed:
+        errors.append("failed does not match failedSymbols")
+
+    coverage = report["coverage"]
+    if not isinstance(coverage, dict):
+        errors.append("coverage must be an object")
+    else:
+        missing_coverage = sorted(set(CRITICAL_FIELDS) - coverage.keys())
+        if missing_coverage:
+            errors.append(
+                "coverage missing fields: {fields}".format(
+                    fields=", ".join(missing_coverage)
+                )
+            )
+        for field in CRITICAL_FIELDS:
+            if field not in coverage:
+                continue
+
+            field_coverage = coverage[field]
+            field_label = "coverage {field}".format(field=field)
+            if not isinstance(field_coverage, dict):
+                errors.append(field_label + " must be an object")
+                continue
+
+            available = field_coverage.get("available")
+            total = field_coverage.get("total")
+            coverage_counts_are_valid = all(
+                _is_non_negative_int(value) for value in (available, total)
+            )
+            if not coverage_counts_are_valid:
+                errors.append(field_label + " available and total must be non-negative integers")
+            else:
+                if available > total:
+                    errors.append(field_label + " available must not exceed total")
+                if counts_are_valid and total != succeeded:
+                    errors.append(field_label + " total must equal succeeded")
+
+            rate = field_coverage.get("rate")
+            if not _is_rate(rate):
+                errors.append(field_label + " rate must be a finite number between zero and one")
+                continue
+
+            if coverage_counts_are_valid and not _rate_matches(rate, available, total):
+                errors.append(field_label + " rate does not match available and total")
+            if rate < MIN_CRITICAL_FIELD_COVERAGE:
+                errors.append(
+                    "{field_label} rate {actual:.0%} is below {minimum:.0%}".format(
+                        field_label=field_label,
+                        actual=rate,
+                        minimum=MIN_CRITICAL_FIELD_COVERAGE,
+                    )
+                )
+    return errors
+
+
+def check_data_quality(path):
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as ex:
+        print("data quality check failed: {ex}".format(ex=ex))
+        return 1
+
+    errors = validate_data_quality(report)
+    if errors:
+        for error in errors:
+            print("data quality check failed: {error}".format(error=error))
+        return 1
+
+    print(
+        "data quality check passed: {succeeded}/{requested} ({rate:.2%})".format(
+            succeeded=report["succeeded"],
+            requested=report["requested"],
+            rate=report["successRate"],
+        )
+    )
+    return 0
+
+
 def main():
+    args = parse_args()
     root = pathlib.Path(__file__).parent.resolve()
     # stat.json is consumed by the front-end from Vite's public/ dir
     stock_folder_path = root / ".." / ".." / "public"
-    if not os.path.exists(stock_folder_path):
-        os.makedirs(stock_folder_path)
+    stock_folder_path.mkdir(parents=True, exist_ok=True)
 
-    stock_info = get_stock_universe()
+    quality_path = stock_folder_path / "data-quality.json"
+    if args.check_quality:
+        return check_data_quality(quality_path)
+
+    stock_info = list(dict.fromkeys(get_stock_universe(args.input)))
     if not stock_info:
-        print("empty stock universe, exit")
-        sys.exit(1)
+        write_json(quality_path, build_data_quality({}, 0, []))
+        print("empty stock universe")
+        return 0
 
     print("scanning {n} symbols".format(n=len(stock_info)))
 
@@ -458,46 +696,48 @@ def main():
     stock_stat = {}
     failed = []
     for idx, symbol in enumerate(stock_info):
-        stock_data = get_stock_1y_data_from_yahoo(symbol)
-        if stock_data and len(stock_data) > 0 and not math.isnan(stock_data[0]["Close"]):
-            stat = {
-                "Close": stock_data[0]["Close"],
-                "P/E": "-", "P/B": "-", "Dividend %": "-", "52W High": "-", "52W Low": "-",
-                "Perf Week": "-", "Perf Month": "-", "Perf Quarter": "-", "Perf Half Y": "-",
-                "Perf Year": "-", "Perf YTD": "-",
-            }
-            perf = compute_performance(stock_data)
-            ma = compute_ma_offsets(stock_data)
-            hl = compute_hl_offsets(stock_data)
-            stat.update(perf)
-            stat.update(ma)
-            stat.update(hl)
+        succeeded = False
+        try:
+            stock_data = get_stock_1y_data_from_yahoo(symbol)
+            if stock_data and not math.isnan(stock_data[0]["Close"]):
+                stat = {
+                    "Close": stock_data[0]["Close"],
+                    "P/E": "-", "P/B": "-", "Dividend %": "-", "52W High": "-", "52W Low": "-",
+                    "Perf Week": "-", "Perf Month": "-", "Perf Quarter": "-", "Perf Half Y": "-",
+                    "Perf Year": "-", "Perf YTD": "-",
+                }
+                stat.update(compute_performance(stock_data))
+                stat.update(compute_ma_offsets(stock_data))
+                stat.update(compute_hl_offsets(stock_data))
 
-            base = get_stock_base_info(symbol)
-            if base:
-                stat.update(base)
+                base = get_stock_base_info(symbol)
+                if base:
+                    stat.update(base)
 
-            stock_stat[symbol] = stat
-            if (idx + 1) % 50 == 0:
-                print('download stock {symbol} ({idx}/{total}) done'.format(symbol=symbol, idx=idx + 1, total=len(stock_info)))
-        else:
+                stock_stat[symbol] = stat
+                succeeded = True
+                if (idx + 1) % 50 == 0:
+                    print('download stock {symbol} ({idx}/{total}) done'.format(symbol=symbol, idx=idx + 1, total=len(stock_info)))
+        except Exception as ex:
+            print('stock {symbol} failed: {ex}'.format(symbol=symbol, ex=ex))
+
+        if not succeeded:
             failed.append(symbol)
             print('stock {symbol} is null'.format(symbol=symbol))
 
         time.sleep(DELAY_TIME_SEC)
 
-    with open(stock_folder_path / 'stat.json', 'w', encoding='utf-8') as f:
-        f.write(json.dumps(stock_stat, separators=(',', ':')))
-
-    with open(stock_folder_path / 'info.json', 'w', encoding='utf-8') as f:
-        f.write(json.dumps(list(stock_stat.keys()), separators=(',', ':')))
-
-    if failed:
-        with open(stock_folder_path / 'failed.json', 'w', encoding='utf-8') as f:
-            f.write(json.dumps(failed, separators=(',', ':')))
+    write_json(stock_folder_path / 'stat.json', stock_stat)
+    write_json(stock_folder_path / 'info.json', list(stock_stat.keys()))
+    write_json(stock_folder_path / 'failed.json', failed)
+    write_json(
+        quality_path,
+        build_data_quality(stock_stat, len(stock_info), failed),
+    )
 
     print('all task done. got {n} stocks, failed {m}'.format(n=len(stock_stat), m=len(failed)))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
