@@ -2,6 +2,9 @@ name: FetchStockDataAndDeploy
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - master
   schedule:
     - cron:  '10 2 * * *'
 
