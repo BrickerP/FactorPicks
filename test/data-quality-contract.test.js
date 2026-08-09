@@ -45,6 +45,7 @@ stock_stat = {
     }
     for index in range(succeeded)
 }
+stock_stat["S0"]["PEG"] = None
 failed_symbols = [
     "F{index}".format(index=index)
     for index in range(requested - succeeded)
@@ -148,6 +149,17 @@ test('Python producer and JavaScript consumer share the six-decimal rate contrac
   assert.equal(hasSuccessRateConflict(outsideTolerance), true)
 })
 
+test('quality manifest includes PEG coverage for default ranking factors', () => {
+  const fixture = manifestFromPython(5, 6).manifest
+
+  assert.ok(Object.hasOwn(fixture.coverage, 'PEG'))
+  assert.deepEqual(fixture.coverage.PEG, {
+    available: 4,
+    total: 5,
+    rate: 0.8,
+  })
+})
+
 test('Python quality checker rejects inconsistent or insufficient field coverage', () => {
   const fixture = manifestFromPython(5, 6).manifest
   const valid = checkTemporaryManifest(fixture)
@@ -169,11 +181,17 @@ test('Python quality checker rejects inconsistent or insufficient field coverage
       coverage: { available: 2, total: 5, rate: 0.4 },
       message: /coverage ROE rate 40% is below 50%/,
     },
+    {
+      name: 'PEG coverage is too low',
+      coverage: { available: 2, total: 5, rate: 0.4 },
+      field: 'PEG',
+      message: /coverage PEG rate 40% is below 50%/,
+    },
   ]
 
   for (const scenario of cases) {
     const manifest = JSON.parse(JSON.stringify(fixture))
-    manifest.coverage.ROE = scenario.coverage
+    manifest.coverage[scenario.field || 'ROE'] = scenario.coverage
     const result = checkTemporaryManifest(manifest)
 
     assert.notEqual(result.status, 0, scenario.name)
