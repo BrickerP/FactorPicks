@@ -13,70 +13,31 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { decisionInput } from './fixtures/decision-v2-fixture.js'
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const CLI_PATH = fileURLToPath(new URL('../scripts/evaluate-decision.js', import.meta.url))
 
 function validBundle() {
-  const now = '2026-08-09T08:00:00.000Z'
-  return {
-    universe: {
-      AAA: { sector: 'Technology', ROE: 0.1 },
-      BBB: { sector: 'Technology', ROE: 0.2 },
-    },
-    symbol: 'AAA',
-    qualityManifest: {
-      schemaVersion: 1,
-      generatedAt: now,
-      source: 'yfinance',
-      requested: 2,
-      succeeded: 2,
-      failed: 0,
-      successRate: 1,
-      coverage: { ROE: { available: 2, total: 2, rate: 1 } },
-      failedSymbols: [],
-    },
-    underwriting: {
-      longTermGate: 'PASS',
-      thesisStatus: 'INTACT',
-      valuationStatus: 'PASS',
-      timingStatus: 'PASS',
-      systemRiskLimit: 0.08,
-    },
-    portfolio: {
-      currentPosition: 0,
-      userHardLimit: 0.1,
-      sectorRemainingCapacity: 0.07,
-      portfolioRemainingCapacity: 0.2,
-    },
-    policy: {
-      research: {
-        factorWeights: { returnOnEquity: 1 },
-        minimumSectorSampleSize: 2,
-        minimumGlobalSampleSize: 2,
-        manifestMaxAgeMs: 0,
-        maxFutureSkewMs: 0,
-        criticalFields: ['ROE'],
-        minimumCriticalFieldCoverage: 1,
-        minimumResearchCoverage: 1,
-      },
-      decision: {
-        eventRiskMode: 'downgrade',
-        pilotPositionLimit: 0.02,
-      },
-    },
-    now,
-  }
+  const bundle = decisionInput()
+  bundle.evaluatedPrice.sentinel = 'do-not-copy'
+  Object.assign(bundle.portfolioCapacity.currentPosition, {
+    quantity: 42,
+    marketValue: 1_000,
+    accountId: 'secret-account',
+    netLiquidationValue: 500_000,
+  })
+  return bundle
 }
 
-function runCli(ledgerPath) {
+function runCli(ledgerPath, bundle = validBundle()) {
   return spawnSync(
     process.execPath,
     [CLI_PATH, '-', '--ledger', ledgerPath],
     {
       cwd: REPOSITORY_ROOT,
       encoding: 'utf8',
-      input: JSON.stringify(validBundle()),
+      input: JSON.stringify(bundle),
     },
   )
 }
@@ -130,10 +91,46 @@ test('ledger appends only to an external absolute or resolved path', () => {
 
       assert.equal(result.status, 0, result.stderr)
       const stdoutDecision = JSON.parse(result.stdout)
+      assert.equal(stdoutDecision.schemaVersion, 2)
+      assert.equal(stdoutDecision.buyAction, 'OPEN')
+      assert.equal('recommendedPosition' in stdoutDecision, false)
       const ledgerLines = readFileSync(ledgerPath, 'utf8').trim().split('\n')
       assert.equal(ledgerLines.length, 1)
-      assert.deepEqual(JSON.parse(ledgerLines[0]), stdoutDecision)
+      const ledgerDecision = JSON.parse(ledgerLines[0])
+      assert.deepEqual(ledgerDecision, stdoutDecision)
+      for (const decision of [stdoutDecision, ledgerDecision]) {
+        assert.doesNotMatch(
+          JSON.stringify(decision),
+          /netLiquidationValue|quantity|marketValue|accountId|sentinel/i,
+        )
+      }
     }
+  } finally {
+    rmSync(externalDirectory, { recursive: true, force: true })
+  }
+})
+
+test('external blocker and reason codes cannot leak through stdout or ledger', () => {
+  const externalDirectory = mkdtempSync(join(tmpdir(), 'factorpicks-ledger-'))
+  const ledgerPath = join(externalDirectory, 'decision.jsonl')
+  const bundle = validBundle()
+  bundle.research.dataStatus = 'EVALUATION_BLOCKED'
+  bundle.research.blockerCodes = ['accountId:RH-123']
+  bundle.timingAssessment.reasonCodes = ['sentinel-private-code']
+
+  try {
+    const result = runCli(ledgerPath, bundle)
+    assert.equal(result.status, 0, result.stderr)
+    const stdoutDecision = JSON.parse(result.stdout)
+    const ledgerDecision = JSON.parse(readFileSync(ledgerPath, 'utf8').trim())
+
+    assert.deepEqual(ledgerDecision, stdoutDecision)
+    assert.ok(stdoutDecision.blockerCodes.includes('RESEARCH_BLOCKED'))
+    assert.ok(stdoutDecision.timingAssessment.reasonCodes.includes('TIMING_RESTRICTED'))
+    assert.doesNotMatch(
+      `${result.stdout}\n${JSON.stringify(ledgerDecision)}`,
+      /RH-123|sentinel-private-code|accountId/i,
+    )
   } finally {
     rmSync(externalDirectory, { recursive: true, force: true })
   }
