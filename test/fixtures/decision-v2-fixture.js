@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { derivePortfolioCapacitySnapshot } from '../../src/domain/portfolioCapacity.js'
+import { capacityInput } from './portfolio-capacity-fixture.js'
 
 export const NOW = '2026-08-09T08:00:00.000Z'
 export const SNAPSHOT_AS_OF = '2026-08-09T07:55:00.000Z'
@@ -130,10 +132,43 @@ export function decisionInput(overrides = {}) {
     'quality',
     'research',
     'underwriting',
-    'portfolio',
-    'capacity-policy',
     'decision-policy',
   ].map(label => [label, snapshot(label)]))
+  const weightSupplied = Object.hasOwn(
+    overrides.portfolioCapacity?.currentPosition ?? {},
+    'weight',
+  )
+  const requestedWeight = overrides.portfolioCapacity?.currentPosition?.weight
+  const derivableWeight = Number.isFinite(requestedWeight) ? requestedWeight : 0
+  const requestedLiquidity = overrides.portfolioCapacity?.remainingCapacity?.liquidity
+  const liquidityRemaining = Number.isFinite(requestedLiquidity)
+    ? requestedLiquidity
+    : 0.03
+  const derivedCapacity = derivePortfolioCapacitySnapshot(capacityInput({
+    portfolio: {
+      positions: derivableWeight > 0
+        ? [{
+            symbol: 'AAA',
+            quantity: derivableWeight * 100_000,
+            markPrice: 1,
+            asOf: SNAPSHOT_AS_OF,
+            currency: 'USD',
+            assetType: 'EQUITY',
+            side: 'LONG',
+            sector: 'Technology',
+            industry: 'Software',
+          }]
+        : [],
+      targetClassification: {
+        sector: 'Technology',
+        industry: 'Software',
+      },
+    },
+    liquidity: { maxPositionWeight: derivableWeight + liquidityRemaining },
+  }))
+  if (weightSupplied && !Number.isFinite(requestedWeight)) {
+    derivedCapacity.portfolioCapacity.currentPosition.weight = requestedWeight
+  }
   const input = {
     research: {
       symbol: 'AAA',
@@ -167,41 +202,7 @@ export function decisionInput(overrides = {}) {
       evidenceIds: [opaqueRef('evidence', 'timing')],
       reasonCodes: [],
     },
-    portfolioCapacity: {
-      asOf: SNAPSHOT_AS_OF,
-      denominator: {
-        kind: 'NET_LIQUIDATION_VALUE',
-        asOf: SNAPSHOT_AS_OF,
-        sourceRef: opaqueRef('source', 'robinhood-readonly'),
-        snapshotRef: opaqueRef('snapshot', 'portfolio-private'),
-        digest: digest({ denominator: 'portfolio' }),
-      },
-      currentPosition: {
-        weight: 0,
-        positionRef: opaqueRef('position', 'AAA'),
-      },
-      hardLimits: {
-        userHardLimit: 0.1,
-        systemRiskLimit: 0.08,
-        sectorHardLimit: 0.09,
-        industryHardLimit: 0.07,
-        portfolioHardLimit: 0.12,
-        liquidityHardLimit: 0.06,
-      },
-      remainingCapacity: {
-        sector: 0.05,
-        industry: 0.04,
-        portfolio: 0.09,
-        liquidity: 0.03,
-      },
-      portfolioSnapshotRef: snapshotEntries.portfolio.ref,
-      capacityPolicyRef: snapshotEntries['capacity-policy'].ref,
-      digests: {
-        capacity: digest({ capacity: 'AAA' }),
-        portfolio: digest({ portfolio: 'AAA' }),
-        capacityPolicy: digest({ policy: 'capacity' }),
-      },
-    },
+    portfolioCapacity: derivedCapacity.portfolioCapacity,
     decisionPolicy: {
       targetPosition: 0.05,
       pilotPositionLimit: 0.01,
@@ -210,32 +211,20 @@ export function decisionInput(overrides = {}) {
       maxFutureSkewMs: 60_000,
       ref: snapshotEntries['decision-policy'].ref,
     },
-    resolvedSnapshots: Object.values(snapshotEntries).map(entry => entry.resolved),
+    resolvedSnapshots: Object.values(snapshotEntries)
+      .map(entry => entry.resolved)
+      .concat(derivedCapacity.resolvedSnapshots),
     now: NOW,
   }
 
-  return {
+  const merged = {
     ...input,
     ...overrides,
     research: { ...input.research, ...overrides.research },
     underwriting: { ...input.underwriting, ...overrides.underwriting },
     timingAssessment: { ...input.timingAssessment, ...overrides.timingAssessment },
-    portfolioCapacity: {
-      ...input.portfolioCapacity,
-      ...overrides.portfolioCapacity,
-      currentPosition: {
-        ...input.portfolioCapacity.currentPosition,
-        ...overrides.portfolioCapacity?.currentPosition,
-      },
-      hardLimits: {
-        ...input.portfolioCapacity.hardLimits,
-        ...overrides.portfolioCapacity?.hardLimits,
-      },
-      remainingCapacity: {
-        ...input.portfolioCapacity.remainingCapacity,
-        ...overrides.portfolioCapacity?.remainingCapacity,
-      },
-    },
+    portfolioCapacity: input.portfolioCapacity,
     decisionPolicy: { ...input.decisionPolicy, ...overrides.decisionPolicy },
   }
+  return merged
 }

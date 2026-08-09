@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { projectPortfolioCapacity } from './portfolioCapacity.js'
 
 const LONG_TERM_GATE_STATUSES = new Set(['PASS', 'FAIL', 'BLOCKED'])
 const TIMING_STATUSES = new Set(['PASS', 'EVENT_RISK', 'FAIL', 'BLOCKED'])
@@ -10,15 +11,6 @@ const MANUAL_STATE_BY_STATUS = Object.freeze({
   CONFIRMED: 'TRIGGERED',
   REJECTED: 'UNTRIGGERED',
 })
-const HARD_LIMIT_KEYS = [
-  'userHardLimit',
-  'systemRiskLimit',
-  'sectorHardLimit',
-  'industryHardLimit',
-  'portfolioHardLimit',
-  'liquidityHardLimit',
-]
-const REMAINING_CAPACITY_KEYS = ['sector', 'industry', 'portfolio', 'liquidity']
 const OPAQUE_REF_PATTERN = /^[a-z][a-z0-9-]*:[0-9a-f]{64}$/
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/
 const RESEARCH_BLOCKER_CODES = new Set([
@@ -509,12 +501,21 @@ function validateSnapshotRefs(input, blockers) {
   const resolvedSnapshots = Array.isArray(input.resolvedSnapshots)
     ? input.resolvedSnapshots
     : []
+  const resolvedById = new Map()
+  for (const resolved of resolvedSnapshots) {
+    if (!isObject(resolved) || !isOpaqueRef(resolved.id)) continue
+    if (resolvedById.has(resolved.id)) {
+      addBlocker(blockers, 'DUPLICATE_RESOLVED_SNAPSHOT_ID')
+      continue
+    }
+    resolvedById.set(resolved.id, resolved)
+  }
   for (const ref of refs) {
     if (!isSnapshotRef(ref)) {
       addBlocker(blockers, 'MISSING_SNAPSHOT_REFERENCE')
       continue
     }
-    const resolved = resolvedSnapshots.find(candidate => candidate?.id === ref.id)
+    const resolved = resolvedById.get(ref.id)
     if (!resolved) {
       addBlocker(blockers, 'MISSING_RESOLVED_SNAPSHOT')
       continue
@@ -535,6 +536,7 @@ function validateSnapshotRefs(input, blockers) {
       addBlocker(blockers, 'SNAPSHOT_DIGEST_MISMATCH')
     }
   }
+  return resolvedById
 }
 
 function validateTemporalInputs(input, blockers) {
@@ -596,7 +598,6 @@ function validateDecisionInputs(input) {
     )
     for (const code of researchBlockers) addBlocker(blockers, code)
   }
-  validateSnapshotRefs(input, blockers)
   validateEvidence(input, blockers)
   if (!LONG_TERM_GATE_STATUSES.has(underwriting.longTermGate) ||
       underwriting.longTermGate === 'BLOCKED' ||
@@ -621,73 +622,6 @@ function validateDecisionInputs(input) {
   validateTemporalInputs(input, blockers)
 
   return blockers
-}
-
-function capacityFor(portfolioCapacity, blockers) {
-  if (!isObject(portfolioCapacity) || !isTimestamp(portfolioCapacity.asOf) ||
-      portfolioCapacity.denominator?.kind !== 'NET_LIQUIDATION_VALUE' ||
-      !isTimestamp(portfolioCapacity.denominator?.asOf) ||
-      !isOpaqueRef(portfolioCapacity.denominator?.sourceRef) ||
-      !isOpaqueRef(portfolioCapacity.denominator?.snapshotRef) ||
-      !isDigest(portfolioCapacity.denominator?.digest) ||
-      !isOpaqueRef(portfolioCapacity.currentPosition?.positionRef) ||
-      !Number.isFinite(portfolioCapacity.currentPosition?.weight) ||
-      portfolioCapacity.currentPosition.weight < 0) {
-    addBlocker(blockers, 'INVALID_PORTFOLIO_CAPACITY')
-    return null
-  }
-
-  const hardLimits = portfolioCapacity.hardLimits
-  const remaining = portfolioCapacity.remainingCapacity
-  const hardLimitValues = isObject(hardLimits)
-    ? HARD_LIMIT_KEYS.map(key => hardLimits[key])
-    : []
-  const remainingValues = isObject(remaining)
-    ? REMAINING_CAPACITY_KEYS.map(key => remaining[key])
-    : []
-  if (hardLimitValues.length !== HARD_LIMIT_KEYS.length ||
-      remainingValues.length !== REMAINING_CAPACITY_KEYS.length ||
-      hardLimitValues.some(value => !Number.isFinite(value) || value < 0) ||
-      !Number.isFinite(hardLimits?.userHardLimit) || hardLimits.userHardLimit <= 0 ||
-      !Number.isFinite(hardLimits?.systemRiskLimit) || hardLimits.systemRiskLimit <= 0 ||
-      remainingValues.some(value => !Number.isFinite(value) || value < 0) ||
-      !isObject(portfolioCapacity.digests) ||
-      !['capacity', 'portfolio', 'capacityPolicy'].every(
-        key => isDigest(portfolioCapacity.digests[key]),
-      )) {
-    addBlocker(blockers, 'INVALID_PORTFOLIO_CAPACITY')
-    return null
-  }
-
-  const currentWeight = portfolioCapacity.currentPosition.weight
-  const effectiveLimit = Math.min(
-    hardLimits.userHardLimit,
-    hardLimits.systemRiskLimit,
-    hardLimits.sectorHardLimit,
-    hardLimits.industryHardLimit,
-    hardLimits.portfolioHardLimit,
-    hardLimits.liquidityHardLimit,
-    currentWeight + remaining.sector,
-    currentWeight + remaining.industry,
-    currentWeight + remaining.portfolio,
-    currentWeight + remaining.liquidity,
-  )
-
-  return {
-    currentPosition: {
-      weight: portfolioCapacity.currentPosition.weight,
-      positionRef: portfolioCapacity.currentPosition.positionRef,
-    },
-    effectiveLimit,
-    capacityToLimit: Math.max(0, effectiveLimit - currentWeight),
-    portfolioSnapshotRef: snapshotIdentity(portfolioCapacity.portfolioSnapshotRef),
-    capacityPolicyRef: snapshotIdentity(portfolioCapacity.capacityPolicyRef),
-    digests: {
-      capacity: portfolioCapacity.digests.capacity,
-      portfolio: portfolioCapacity.digests.portfolio,
-      capacityPolicy: portfolioCapacity.digests.capacityPolicy,
-    },
-  }
 }
 
 function positionSizingFor(decisionPolicy, capacitySummary, targetCap = Infinity) {
@@ -758,7 +692,13 @@ function prohibitedForHolding(
 
 export function evaluateDecision(input) {
   const blockers = validateDecisionInputs(input)
-  const capacitySummary = capacityFor(input.portfolioCapacity, blockers)
+  const resolvedSnapshots = validateSnapshotRefs(input, blockers)
+  const capacitySummary = projectPortfolioCapacity(
+    input.portfolioCapacity,
+    input.research?.symbol,
+    resolvedSnapshots,
+  )
+  if (capacitySummary === null) addBlocker(blockers, 'INVALID_PORTFOLIO_CAPACITY')
   if (blockers.length > 0) return blockedRecord(input, blockers)
 
   const currentWeight = capacitySummary.currentPosition.weight
