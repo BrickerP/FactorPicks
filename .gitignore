@@ -62,9 +62,11 @@ dist
 .DS_Store
 
 # Yarn
-yarn-error.log
 .pnp/
 .pnp.js
 # Yarn Integrity file
 .yarn-integrity
-/.github/norn-data
+
+# Python bytecode
+__pycache__/
+*.pyc
