@@ -6,7 +6,6 @@ import process from "node:process"
 import { fileURLToPath } from "node:url"
 
 import { evaluateDecision } from "../src/domain/evaluateDecision.js"
-import { evaluateResearch } from "../src/domain/evaluateResearch.js"
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("..", import.meta.url))
 const USAGE = "Usage: npm run decision -- [input.json|-] [--ledger path]"
@@ -127,22 +126,7 @@ async function main() {
     ? undefined
     : await resolveLedgerPath(ledgerPath)
   const bundle = await readBundle(inputPath)
-  const { universe, symbol, qualityManifest, underwriting, portfolio, policy, now } = bundle
-
-  const research = evaluateResearch({
-    universe,
-    symbol,
-    qualityManifest,
-    policy,
-    now,
-  })
-  const decision = evaluateDecision({
-    research,
-    underwriting,
-    portfolio,
-    policy,
-    now,
-  })
+  const decision = evaluateDecision(bundle)
 
   if (resolvedLedgerPath !== undefined) {
     await appendFile(resolvedLedgerPath, `${JSON.stringify(decision)}\n`, "utf8")
