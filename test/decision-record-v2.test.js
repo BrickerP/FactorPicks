@@ -419,6 +419,14 @@ test('every snapshot identity requires an independently resolved matching payloa
   }
 })
 
+test('duplicate resolved snapshot IDs always block identity resolution', () => {
+  const input = decisionInput()
+  input.resolvedSnapshots.push(structuredClone(input.resolvedSnapshots[0]))
+
+  const result = evaluateDecision(input)
+  assertBlocked(result, 'DUPLICATE_RESOLVED_SNAPSHOT_ID')
+})
+
 test('snapshot hashing matches an independent hard-coded canonical SHA-256 vector', () => {
   const snapshotRef = {
     id: `snapshot:${'1'.repeat(64)}`,

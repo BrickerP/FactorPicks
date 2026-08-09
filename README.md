@@ -90,6 +90,35 @@ only; it does not prove source authenticity, persistence, or full SnapshotStore
 reproducibility. Resolved payloads are validation inputs and are never copied
 into the `DecisionRecordV2` or ledger.
 
+## Portfolio capacity CLI
+
+The broker-neutral capacity seam derives one sanitized
+`PortfolioCapacitySnapshot` from a complete, time-coherent USD cash-account
+snapshot, explicit capacity policy, and an independent liquidity limit. It is a
+pure local transformation: no broker SDK, OAuth flow, network request, ledger
+write, or order capability is involved.
+
+The input must include an explicit `evaluatedAt`, freshness limits for the
+portfolio and liquidity observations, and capacity-policy provenance with
+`sourceRef`, `effectiveFrom`, and `effectiveUntil`. Portfolio positions and the
+target symbol use canonical uppercase ticker identifiers. Portfolio and
+liquidity observations must share one as-of timestamp, and that timestamp must
+fall inside the policy validity window.
+
+```bash
+npm run capacity -- /secure/path/portfolio-capacity-input.json
+
+# Or pipe one JSON object through stdin.
+npm run capacity -- - < /secure/path/portfolio-capacity-input.json
+```
+
+Raw NLV, quantity, mark price, account ID, buying power, and cost basis are
+accepted only as ephemeral input facts where applicable and are never emitted.
+The output contains the derived capacity plus two sanitized resolved snapshot
+payloads that can be merged directly into a `DecisionRecordV2` bundle.
+Incomplete, margin, multi-account, non-USD, short, option, crypto, mixed-as-of,
+or unclassified inputs fail closed.
+
 ## Local development
 
 ```bash
