@@ -27,6 +27,7 @@ CRITICAL_FIELDS = (
     "industry",
     "Market Cap",
     "P/E",
+    "PEG",
     "ROE",
     "Debt/Eq",
     "FCFF/EV",

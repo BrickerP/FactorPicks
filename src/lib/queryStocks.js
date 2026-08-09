@@ -1,4 +1,4 @@
-import { MFDataTemplate } from './mf'
+import { MFDataTemplate } from './mf.js'
 
 // ============================================================
 // Pure-frontend query engine operating directly on the stat.json
@@ -112,6 +112,11 @@ function applyFilter(row, filter) {
 }
 
 // ---------------- Multi-factor scoring ----------------
+function weightValue(weight) {
+  const value = parseFloat(weight.val)
+  return Number.isFinite(value) ? value : 0
+}
+
 // z-score each factor across the whole universe, weight, sum.
 function computeMultiFactorScores(data, weights) {
   const symbols = Object.keys(data)
@@ -163,7 +168,7 @@ function computeMultiFactorScores(data, weights) {
         case 'ShareOutstandingOneYear_w': val = toNumber(row['ShareOutstandingOneYear']); break
         default: val = null
       }
-      raw[name][sym] = val
+      raw[name][sym] = val != null && Number.isFinite(val) ? val : null
     })
   })
 
@@ -178,6 +183,7 @@ function computeMultiFactorScores(data, weights) {
       if (v != null) { vals[sym] = v; list.push(v) }
     })
     if (list.length < 10) { return }
+    if (new Set(list).size < 2) { return }
     const mean = list.reduce((a, b) => a + b, 0) / list.length
     const varSum = list.reduce((a, b) => a + (b - mean) ** 2, 0) / list.length
     const std = Math.sqrt(varSum)
@@ -195,7 +201,7 @@ function computeMultiFactorScores(data, weights) {
 
   // weighted sum
   const weightsMap = {}
-  weights.forEach(w => { weightsMap[w.name] = parseFloat(w.val) || 0 })
+  weights.forEach(w => { weightsMap[w.name] = weightValue(w) })
 
   const out = {}
   symbols.forEach(sym => {
@@ -211,7 +217,16 @@ function computeMultiFactorScores(data, weights) {
     })
     out[sym] = wSum > 0 ? total / wSum : null
   })
-  return out
+  const required = weights
+    .filter(weight => weightValue(weight) > 0)
+    .map(weight => weight.name)
+  const eligible = {}
+  symbols.forEach(sym => {
+    eligible[sym] = required.every(name => (
+      raw[name][sym] != null && Number.isFinite(zscores[name][sym])
+    ))
+  })
+  return { scores: out, eligible }
 }
 
 // ---------------- Simplified risk score ----------------
@@ -253,10 +268,10 @@ export function queryStocks(data, queryData) {
   const weights = mf && mf.args && Object.keys(mf.args).length
     ? MFDataTemplate.weights.filter(w => mf.args[w.name] !== undefined).map(w => ({ name: w.name, val: mf.args[w.name] }))
     : MFDataTemplate.weights
-  const mfScores = computeMultiFactorScores(data, weights)
+  const { scores: mfScores, eligible } = computeMultiFactorScores(data, weights)
   const riskScores = computeRiskScores(data)
 
-  let filtered = rows
+  let filtered = rows.filter(row => eligible[row.symbol])
 
   // interval filters
   const filters = [...baseArg, ...advArg]
