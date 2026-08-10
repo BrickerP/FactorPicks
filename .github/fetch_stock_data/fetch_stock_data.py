@@ -2,6 +2,7 @@ import os
 import sys
 import pathlib
 import argparse
+import hashlib
 import json
 import math
 import time
@@ -92,6 +93,39 @@ def fmt_num(v):
     if math.isnan(f) or math.isinf(f):
         return "-"
     return f
+
+
+def datetime_to_utc_iso(value):
+    try:
+        if hasattr(value, "to_pydatetime"):
+            value = value.to_pydatetime()
+        if not isinstance(value, datetime):
+            return "-"
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return (
+            value.astimezone(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "-"
+
+
+def clean_text(value):
+    if not isinstance(value, str) or not value.strip():
+        return "-"
+    return value.strip()
+
+
+def unix_timestamp_to_utc_iso(value):
+    timestamp = fmt_num(value)
+    if timestamp == "-":
+        return "-"
+    try:
+        return datetime_to_utc_iso(datetime.fromtimestamp(timestamp, timezone.utc))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "-"
 
 
 def pct_decimal(v):
@@ -232,21 +266,44 @@ def get_stock_universe(input_symbols=""):
         return []
 
 
-def get_stock_1y_data_from_yahoo(symbol):
+def get_stock_1y_data_from_yahoo(stock):
     try:
-        stock = yf.Ticker(symbol)
         hist = stock.history(period="1y")
         if hist is None or hist.empty:
             return None
         output = []
         for index, row in hist.iterrows():
-            d = {"Date": index.strftime("%m/%d/%Y"), "Open": row["Open"], "High": row["High"], "Low": row["Low"],
-                 "Close": row["Close"], "Volume": row["Volume"]}
+            d = {
+                "Date": index.strftime("%m/%d/%Y"),
+                "Open": row["Open"],
+                "High": row["High"],
+                "Low": row["Low"],
+                "Close": row["Close"],
+                "Volume": row["Volume"],
+            }
             output.append(d)
         output.reverse()
         return output
     except Exception as ex:
         print('Generated an exception: {ex}'.format(ex=ex))
+    return None
+
+
+def get_stock_quote_from_history_metadata(stock):
+    """Return one atomic USD quote from the ticker's cached chart metadata."""
+    try:
+        metadata = stock.get_history_metadata()
+        if not isinstance(metadata, dict):
+            return None
+
+        close = fmt_num(metadata.get("regularMarketPrice"))
+        as_of = unix_timestamp_to_utc_iso(metadata.get("regularMarketTime"))
+        currency = clean_text(metadata.get("currency"))
+        if close == "-" or as_of == "-" or currency != "USD":
+            return None
+        return {"Close": close, "asOf": as_of, "currency": currency}
+    except Exception as ex:
+        print('get_stock_quote_from_history_metadata exception: {ex}'.format(ex=ex))
     return None
 
 
@@ -316,11 +373,47 @@ def compute_hl_offsets(hist_data):
     return out
 
 
-def get_stock_base_info(symbol):
+def compute_market_observations(hist_data):
+    """Latest volume plus 20-session average volume and true range.
+
+    History rows are newest first. ATR20 therefore needs 21 rows so each of
+    the latest 20 sessions has the prior session close used by true range.
+    """
+    out = {"Volume": "-", "Average Volume 20D": "-", "ATR20": "-"}
+    if not hist_data:
+        return out
+
+    out["Volume"] = fmt_num(hist_data[0].get("Volume"))
+
+    if len(hist_data) >= 20:
+        volumes = [fmt_num(day.get("Volume")) for day in hist_data[:20]]
+        if all(volume != "-" for volume in volumes):
+            out["Average Volume 20D"] = fmt_num(sum(volumes) / 20)
+
+    if len(hist_data) >= 21:
+        true_ranges = []
+        for index in range(20):
+            day = hist_data[index]
+            high = fmt_num(day.get("High"))
+            low = fmt_num(day.get("Low"))
+            previous_close = fmt_num(hist_data[index + 1].get("Close"))
+            if "-" in (high, low, previous_close):
+                break
+            true_ranges.append(max(
+                high - low,
+                abs(high - previous_close),
+                abs(low - previous_close),
+            ))
+        if len(true_ranges) == 20:
+            out["ATR20"] = fmt_num(sum(true_ranges) / 20)
+
+    return out
+
+
+def get_stock_base_info(stock, symbol):
     """Pull fundamentals from yfinance Ticker.info. Returns dict matching the
     original stat.json schema keys, or None on failure."""
     try:
-        stock = yf.Ticker(symbol)
         info = stock.info
         if not info or "symbol" not in info:
             return None
@@ -403,6 +496,14 @@ def get_stock_base_info(symbol):
             "P/C": "-",
             "P/S": pct_decimal(info.get("priceToSalesTrailing12Months")),
             "Target Price": fmt_num(info.get("targetMeanPrice")),
+            "Target Price Low": fmt_num(info.get("targetLowPrice")),
+            "Target Price High": fmt_num(info.get("targetHighPrice")),
+            "Forward EPS": fmt_num(info.get("forwardEps")),
+            "Earnings Date": unix_timestamp_to_utc_iso(
+                info.get("earningsTimestamp")
+                if info.get("earningsTimestamp") is not None
+                else info.get("earningsTimestampStart")
+            ),
             "Short Float": pct_decimal(info.get("shortPercentOfFloat")),
             "Forward P/E": clean_pe(forward_pe),
             "Insider Trans": "-",
@@ -483,6 +584,14 @@ def _is_non_negative_int(value):
     return type(value) is int and value >= 0
 
 
+def _is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _is_rate(value):
     return (
         type(value) in (int, float)
@@ -495,7 +604,7 @@ def _rate_matches(value, numerator, denominator):
     return abs(value - _rate(numerator, denominator)) <= RATE_TOLERANCE
 
 
-def build_data_quality(stock_stat, requested, failed_symbols):
+def build_data_quality(stock_stat, requested, failed_symbols, stat_artifact):
     succeeded = len(stock_stat)
     coverage = {}
     for field in CRITICAL_FIELDS:
@@ -518,14 +627,44 @@ def build_data_quality(stock_stat, requested, failed_symbols):
         "successRate": _rate(succeeded, requested),
         "coverage": coverage,
         "failedSymbols": list(failed_symbols),
+        "statArtifact": dict(stat_artifact),
+    }
+
+
+def serialize_json_bytes(value):
+    return json.dumps(
+        value,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def prepare_stat_artifact(stock_stat):
+    stat_bytes = serialize_json_bytes(stock_stat)
+    return stat_bytes, {
+        "sha256": hashlib.sha256(stat_bytes).hexdigest(),
+        "bytes": len(stat_bytes),
+        "symbols": len(stock_stat),
     }
 
 
 def write_json(path, value):
-    path.write_text(
-        json.dumps(value, separators=(",", ":"), allow_nan=False),
-        encoding="utf-8",
+    path.write_bytes(serialize_json_bytes(value))
+
+
+def write_stock_artifacts(stock_folder_path, stock_stat, requested, failed_symbols):
+    stat_bytes, stat_artifact = prepare_stat_artifact(stock_stat)
+    quality = build_data_quality(
+        stock_stat,
+        requested,
+        failed_symbols,
+        stat_artifact,
     )
+
+    (stock_folder_path / "stat.json").write_bytes(stat_bytes)
+    write_json(stock_folder_path / "info.json", list(stock_stat.keys()))
+    write_json(stock_folder_path / "failed.json", failed_symbols)
+    write_json(stock_folder_path / "data-quality.json", quality)
 
 
 def validate_data_quality(report):
@@ -539,6 +678,7 @@ def validate_data_quality(report):
         "successRate",
         "coverage",
         "failedSymbols",
+        "statArtifact",
     }
     if not isinstance(report, dict):
         return ["quality report must be an object"]
@@ -574,6 +714,24 @@ def validate_data_quality(report):
         errors.append("requested must equal succeeded plus failed")
     elif requested == 0 or succeeded == 0:
         errors.append("stock result must not be empty")
+
+    stat_artifact = report["statArtifact"]
+    if not isinstance(stat_artifact, dict):
+        errors.append("statArtifact must be an object")
+    else:
+        artifact_sha256 = stat_artifact.get("sha256")
+        if not _is_sha256(artifact_sha256):
+            errors.append("statArtifact sha256 must be 64 lowercase hex characters")
+
+        artifact_bytes = stat_artifact.get("bytes")
+        if not _is_non_negative_int(artifact_bytes):
+            errors.append("statArtifact bytes must be a non-negative integer")
+
+        artifact_symbols = stat_artifact.get("symbols")
+        if not _is_non_negative_int(artifact_symbols):
+            errors.append("statArtifact symbols must be a non-negative integer")
+        elif counts_are_valid and artifact_symbols != succeeded:
+            errors.append("statArtifact symbols must equal succeeded")
 
     success_rate = report["successRate"]
     if not _is_rate(success_rate):
@@ -649,6 +807,49 @@ def validate_data_quality(report):
     return errors
 
 
+def validate_stat_artifact_file(report, stat_path):
+    if not isinstance(report, dict):
+        return []
+    stat_artifact = report.get("statArtifact")
+    if not isinstance(stat_artifact, dict):
+        return []
+
+    try:
+        stat_bytes = stat_path.read_bytes()
+    except OSError as ex:
+        return ["stat.json could not be read: {ex}".format(ex=ex)]
+
+    errors = []
+    artifact_sha256 = stat_artifact.get("sha256")
+    if _is_sha256(artifact_sha256):
+        actual_sha256 = hashlib.sha256(stat_bytes).hexdigest()
+        if actual_sha256 != artifact_sha256:
+            errors.append("statArtifact sha256 does not match stat.json")
+
+    artifact_bytes = stat_artifact.get("bytes")
+    if _is_non_negative_int(artifact_bytes) and len(stat_bytes) != artifact_bytes:
+        errors.append("statArtifact bytes does not match stat.json")
+
+    try:
+        stock_stat = json.loads(stat_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        errors.append("stat.json must be valid UTF-8 JSON")
+        return errors
+
+    if not isinstance(stock_stat, dict):
+        errors.append("stat.json must be an object")
+        return errors
+
+    artifact_symbols = stat_artifact.get("symbols")
+    if _is_non_negative_int(artifact_symbols) and len(stock_stat) != artifact_symbols:
+        errors.append("statArtifact symbols does not match stat.json rows")
+
+    succeeded = report.get("succeeded")
+    if _is_non_negative_int(succeeded) and len(stock_stat) != succeeded:
+        errors.append("stat.json row count must equal succeeded")
+    return errors
+
+
 def check_data_quality(path):
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
@@ -657,6 +858,7 @@ def check_data_quality(path):
         return 1
 
     errors = validate_data_quality(report)
+    errors.extend(validate_stat_artifact_file(report, path.with_name("stat.json")))
     if errors:
         for error in errors:
             print("data quality check failed: {error}".format(error=error))
@@ -685,7 +887,7 @@ def main():
 
     stock_info = list(dict.fromkeys(get_stock_universe(args.input)))
     if not stock_info:
-        write_json(quality_path, build_data_quality({}, 0, []))
+        write_stock_artifacts(stock_folder_path, {}, 0, [])
         print("empty stock universe")
         return 0
 
@@ -699,10 +901,21 @@ def main():
     for idx, symbol in enumerate(stock_info):
         succeeded = False
         try:
-            stock_data = get_stock_1y_data_from_yahoo(symbol)
-            if stock_data and not math.isnan(stock_data[0]["Close"]):
+            stock = yf.Ticker(symbol)
+            stock_data = get_stock_1y_data_from_yahoo(stock)
+            quote = get_stock_quote_from_history_metadata(stock)
+            observed_at = datetime_to_utc_iso(datetime.now(timezone.utc))
+            history_close = fmt_num(stock_data[0].get("Close")) if stock_data else "-"
+            if stock_data and history_close != "-" and quote:
                 stat = {
-                    "Close": stock_data[0]["Close"],
+                    "Close": quote["Close"],
+                    "asOf": quote["asOf"],
+                    "observedAt": observed_at,
+                    "currency": quote["currency"],
+                    "Target Price Low": "-",
+                    "Target Price High": "-",
+                    "Forward EPS": "-",
+                    "Earnings Date": "-",
                     "P/E": "-", "P/B": "-", "Dividend %": "-", "52W High": "-", "52W Low": "-",
                     "Perf Week": "-", "Perf Month": "-", "Perf Quarter": "-", "Perf Half Y": "-",
                     "Perf Year": "-", "Perf YTD": "-",
@@ -710,8 +923,9 @@ def main():
                 stat.update(compute_performance(stock_data))
                 stat.update(compute_ma_offsets(stock_data))
                 stat.update(compute_hl_offsets(stock_data))
+                stat.update(compute_market_observations(stock_data))
 
-                base = get_stock_base_info(symbol)
+                base = get_stock_base_info(stock, symbol)
                 if base:
                     stat.update(base)
 
@@ -728,13 +942,7 @@ def main():
 
         time.sleep(DELAY_TIME_SEC)
 
-    write_json(stock_folder_path / 'stat.json', stock_stat)
-    write_json(stock_folder_path / 'info.json', list(stock_stat.keys()))
-    write_json(stock_folder_path / 'failed.json', failed)
-    write_json(
-        quality_path,
-        build_data_quality(stock_stat, len(stock_info), failed),
-    )
+    write_stock_artifacts(stock_folder_path, stock_stat, len(stock_info), failed)
 
     print('all task done. got {n} stocks, failed {m}'.format(n=len(stock_stat), m=len(failed)))
     return 0
