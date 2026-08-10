@@ -259,10 +259,20 @@ export function projectEvidenceBundle(evidence, expectedSymbol, resolvedSnapshot
       ...context,
       evaluatedAt,
     }) !== 'VALID') return null
+    const maxAgeMs = Number.isFinite(context.maxInputAgeMs)
+      ? Math.min(payload.freshnessPolicy.maxAgeMs, context.maxInputAgeMs)
+      : payload.freshnessPolicy.maxAgeMs
+    const maxFutureSkewMs = Number.isFinite(context.maxFutureSkewMs)
+      ? Math.min(payload.freshnessPolicy.maxFutureSkewMs, context.maxFutureSkewMs)
+      : payload.freshnessPolicy.maxFutureSkewMs
     const rebuilt = derive({
       symbol: expectedSymbol,
       evaluatedAt: payload.asOf,
-      freshnessPolicy: payload.freshnessPolicy,
+      freshnessPolicy: {
+        ...payload.freshnessPolicy,
+        maxAgeMs,
+        maxFutureSkewMs,
+      },
       sourcePolicy: sourcePolicyResolved.payload.policy,
       gatePolicy: gatePolicyResolved.payload.policy,
       drafts: payload.drafts,

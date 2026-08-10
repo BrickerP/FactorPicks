@@ -50,93 +50,50 @@ GitHub Actions (daily 02:10 UTC, or manual dispatch)
   → peaceiris/actions-gh-pages → gh-pages branch
 ```
 
-## DecisionRecordV2 CLI
+## Headless decision workbench
 
-The private, headless decision seam consumes one already normalized decision
-bundle. It does not fetch or score the full research universe at request time:
+The private workbench is the one end-to-end entry point for a five-minute
+decision. It accepts a raw case with the canonical public research section
+`research: { universe, qualityManifest, policy }`, resolved source snapshots,
+Evidence/underwriting drafts, timing policy, private capacity facts, and decision
+policy, then returns exactly one sanitized `DecisionRecordV2`:
 
 ```text
-{
-  research, evaluatedPrice, evidence, underwriting, timingAssessment,
-  portfolioCapacity, decisionPolicy, resolvedSnapshots, now
-}
+raw case
+  → evaluateResearch
+  → deriveEvidenceBundle
+  → deriveStructuredUnderwriting
+  → deriveTimingAssessment (price is derived from one fresh quote)
+  → derivePortfolioCapacitySnapshot
+  → evaluateDecision
 ```
 
-`portfolioCapacity` contains only NLV-denominated weights, hard limits,
-remaining capacities, and immutable references/digests. The resulting
-`DecisionRecordV2` excludes raw NLV, quantity, market value, and account ID.
-Persisted IDs and references use `<type>:<64 lowercase hex>`; digests use
-`sha256:<64 lowercase hex>`. Plain account identifiers and credential-bearing
-URLs are rejected rather than copied into a decision or ledger.
-The evidence digest is recomputed from an allow-listed Evidence projection,
-stably sorted by opaque evidence ID. Unknown upstream research or timing codes
-are collapsed to bounded fallback codes instead of being persisted verbatim.
-The complete contract and action matrix are documented in
-[`docs/decision-workbench.md`](docs/decision-workbench.md).
+No caller may submit a derived Evidence bundle, valuation/entry range, timing
+status or price, capacity snapshot, position sizing, or action. Content-addressed
+projectors re-resolve every artifact and reject tampering, duplicate references,
+stale inputs, conflicting quotes, and wrong-symbol/as-of data. Timing can delay
+or cap an action but cannot promote a failed long-term gate. The final action is
+only `OPEN`, `ADD`, `PILOT`, `WATCH`, or `NO_ACTION`; this repository never places
+orders or connects to a broker.
 
 ```bash
-npm run decision -- /secure/path/decision-v2.json
+npm run workbench -- /secure/path/case.json
+npm run workbench -- - < /secure/path/case.json
 
-# Optionally append the same DecisionRecordV2 to an external private ledger.
-npm run decision -- /secure/path/decision-v2.json \
+# Optional append to an external private ledger (never inside this repository).
+npm run workbench -- /secure/path/case.json \
   --ledger /secure/private-ledger/decisions.jsonl
 ```
 
-The ledger path must resolve outside this repository. The CLI evaluates the
-bundle once through `evaluateDecision`; it never places an order. Snapshot
-verification resolves each supplied ID/version to an independent payload and
-recomputes its canonical SHA-256 digest in process. This proves payload identity
-only; it does not prove source authenticity, persistence, or full SnapshotStore
-reproducibility. Resolved payloads are validation inputs and are never copied
-into the `DecisionRecordV2` or ledger.
-
-## Portfolio capacity CLI
-
-The broker-neutral capacity seam derives one sanitized
-`PortfolioCapacitySnapshot` from a complete, time-coherent USD cash-account
-snapshot, explicit capacity policy, and an independent liquidity limit. It is a
-pure local transformation: no broker SDK, OAuth flow, network request, ledger
-write, or order capability is involved.
-
-The input must include an explicit `evaluatedAt`, freshness limits for the
-portfolio and liquidity observations, and capacity-policy provenance with
-`sourceRef`, `effectiveFrom`, and `effectiveUntil`. Portfolio positions and the
-target symbol use canonical uppercase ticker identifiers. Portfolio and
-liquidity observations must share one as-of timestamp, and that timestamp must
-fall inside the policy validity window.
-
-```bash
-npm run capacity -- /secure/path/portfolio-capacity-input.json
-
-# Or pipe one JSON object through stdin.
-npm run capacity -- - < /secure/path/portfolio-capacity-input.json
-```
-
-Raw NLV, quantity, mark price, account ID, buying power, and cost basis are
-accepted only as ephemeral input facts where applicable and are never emitted.
-The output contains the derived capacity plus two sanitized resolved snapshot
-payloads that can be merged directly into a `DecisionRecordV2` bundle.
-Incomplete, margin, multi-account, non-USD, short, option, crypto, mixed-as-of,
-or unclassified inputs fail closed.
-
-## Structured underwriting CLI
-
-`npm run underwriting -- [input.json|-]` derives one content-addressed,
-Evidence-backed underwriting artifact from a local JSON document. With `-` (or
-no path), it reads stdin. It performs no fetch, ledger write, broker access, or
-order operation.
-
-The builder verifies canonical identity and internal integrity of resolved
-source snapshots. This proves that the artifact refers to unchanged bytes; it
-does not prove that an external publisher's facts are authentic or true.
-Claims, source payloads, account facts, and private policy do not enter public
-Pages artifacts or the allow-listed `DecisionRecordV2` output.
-
-Evidence freshness is re-evaluated at underwriting time and again at decision
-time, so an old but internally valid bundle cannot be replayed into a new
-`OPEN` or `ADD`. Decision sizing and timing limits are projected from the
-resolved, content-addressed decision-policy payload; mismatched outer policy
-fields fail closed.
+Semantic data problems always produce `EVALUATION_BLOCKED` + `NO_ACTION` with
+bounded blocker codes. Only malformed JSON, invalid CLI arguments, or file I/O
+errors exit non-zero. Raw NLV, quantity, mark price, account identifiers,
+credentials, source payloads, free-form invalidation conditions/responses, and
+private claims are never copied to the output or ledger. The public invalidation
+projection contains only rule identity, evidence references, bounded severity,
+and state. Derived fields submitted by a caller are rejected; only canonical
+raw sections are accepted. The complete contract and action matrix are documented in
+[`docs/decision-workbench.md`](docs/decision-workbench.md).
 
 ## Local development
 

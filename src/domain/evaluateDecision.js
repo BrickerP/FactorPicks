@@ -11,8 +11,8 @@ import {
 import { classifyEvidenceFreshness, projectEvidenceBundle } from './evidence.js'
 import { projectPortfolioCapacity } from './portfolioCapacity.js'
 import { projectStructuredUnderwriting } from './structuredUnderwriting.js'
+import { projectTimingAssessment } from './timingAssessment.js'
 
-const TIMING_STATUSES = new Set(['PASS', 'EVENT_RISK', 'FAIL', 'BLOCKED'])
 const RESEARCH_BLOCKER_CODES = new Set([
   'EMPTY_MANIFEST_RESULTS',
   'FAILED_SYMBOL_COUNT_CONFLICT',
@@ -48,7 +48,17 @@ const RESEARCH_BLOCKER_CODES = new Set([
   'UNKNOWN_FACTOR_WEIGHT',
   'UNSUPPORTED_QUALITY_MANIFEST_SCHEMA',
 ])
-const TIMING_REASON_CODES = new Set(['EARNINGS_SOON'])
+const TIMING_REASON_CODES = new Set([
+  'TIMING_PRICE_MISSING',
+  'TIMING_PRICE_CONFLICT',
+  'TIMING_PRICE_STALE',
+  'TIMING_PRICE_FUTURE',
+  'TIMING_EVIDENCE_NOT_FRESH',
+  'TIMING_SUPPORT_MISSING',
+  'TIMING_SUPPORT_NOT_OBSERVED',
+  'TIMING_FAILED',
+  'EARNINGS_SOON',
+])
 
 function isObject(value) {
   return value !== null && !Array.isArray(value) && typeof value === 'object'
@@ -170,27 +180,11 @@ function entryRangeRecord(value) {
 function invalidationRuleRecord(rule) {
   return {
     id: isOpaqueRef(rule?.id) ? rule.id : null,
-    condition: rule?.condition,
     evidenceIds: Array.isArray(rule?.evidenceIds)
       ? rule.evidenceIds.filter(isOpaqueRef)
       : [],
-    predicate: isObject(rule?.predicate)
-      ? {
-          kind: rule.predicate.kind,
-          metric: rule.predicate.metric,
-          operator: rule.predicate.operator,
-          threshold: rule.predicate.threshold,
-          lookback: rule.predicate.lookback,
-          consecutive: rule.predicate.consecutive,
-          source: rule.predicate.source,
-        }
-      : null,
-    manualStatus: rule?.manualStatus,
     severity: rule?.severity,
     state: rule?.state,
-    derivedFromAsOf: rule?.derivedFromAsOf,
-    observedAt: rule?.observedAt,
-    response: rule?.response,
   }
 }
 
@@ -321,7 +315,7 @@ function validateTemporalInputs(input, blockers) {
     input.portfolioCapacity?.asOf,
     input.underwriting?.valuationRange?.asOf,
     input.underwriting?.entryRange?.asOf,
-  ]
+  ].filter(value => value !== null && value !== undefined)
   for (const asOf of asOfValues) {
     validateTemporalValue({
       value: asOf,
@@ -411,23 +405,32 @@ function validateDecisionInputs(input) {
     isOpaqueRef(input.evaluatedPrice.source) && (!projectedUnderwriting ||
       input.evaluatedPrice.currency === projectedUnderwriting.entryRange.currency)
   if (!evaluatedPriceValid) addBlocker(blockers, 'INVALID_EVALUATED_PRICE')
-  const timingShapeValid = TIMING_STATUSES.has(timingAssessment.status) &&
-      timingAssessment.status !== 'BLOCKED' &&
-      isTimestamp(timingAssessment.asOf) &&
-      Array.isArray(timingAssessment.evidenceIds) && timingAssessment.evidenceIds.length > 0 &&
-      Array.isArray(timingAssessment.reasonCodes)
-  if (!timingShapeValid) {
-    addBlocker(blockers, 'INVALID_TIMING_ASSESSMENT')
-  }
-  const timingIds = timingAssessment.evidenceIds
-  const evidenceIds = new Set(projectedEvidence?.items?.map(item => item.id) ?? [])
-  const timingEvidenceValid = Array.isArray(timingIds) &&
-    new Set(timingIds).size === timingIds.length &&
-    timingIds.every(id => isOpaqueRef(id) && evidenceIds.has(id))
-  if (!timingEvidenceValid) addBlocker(blockers, 'INVALID_TIMING_EVIDENCE')
-  const projectedTimingAssessment = timingShapeValid && timingEvidenceValid
-    ? timingAssessmentRecord(timingAssessment)
+  let projectedTimingAssessment = null
+  const timingProjection = isSnapshotRef(timingAssessment?.snapshotRef)
+    ? projectTimingAssessment(
+      timingAssessment,
+      research.symbol,
+      projectedEvidence,
+      input.resolvedSnapshots,
+      {
+        evaluatedAt: input.now,
+        maxInputAgeMs: projectedDecisionPolicy?.maxInputAgeMs,
+        maxFutureSkewMs: projectedDecisionPolicy?.maxFutureSkewMs,
+      },
+    )
     : null
+  if (!timingProjection) {
+    addBlocker(blockers, 'INVALID_TIMING_ASSESSMENT')
+  } else {
+    projectedTimingAssessment = timingAssessmentRecord(timingProjection.timingAssessment)
+    if (timingProjection.timingAssessment.status === 'BLOCKED') {
+      addBlocker(blockers, 'TIMING_BLOCKED')
+      projectedTimingAssessment = null
+    }
+    if (!sameCanonical(input.evaluatedPrice, timingProjection.evaluatedPrice)) {
+      addBlocker(blockers, 'INVALID_EVALUATED_PRICE')
+    }
+  }
   if (!projectedDecisionPolicy ||
       !Number.isFinite(projectedDecisionPolicy.targetPosition) || projectedDecisionPolicy.targetPosition < 0 ||
       !Number.isFinite(projectedDecisionPolicy.pilotPositionLimit) || projectedDecisionPolicy.pilotPositionLimit <= 0 ||
@@ -457,15 +460,15 @@ function positionSizingFor(decisionPolicy, capacitySummary, targetCap = Infinity
   }
 }
 
-function blockedRecord(input, blockerCodes) {
-  const holding = Number.isFinite(input.portfolioCapacity?.currentPosition?.weight) &&
-    input.portfolioCapacity.currentPosition.weight > 0
+function blockedRecord(input, blockerCodes, capacitySummary = null) {
+  const holding = Number.isFinite(capacitySummary?.currentPosition?.weight) &&
+    capacitySummary.currentPosition.weight > 0
   return {
     ...commonRecord(input),
     dataStatus: 'EVALUATION_BLOCKED',
     entryStatus: 'PROHIBITED',
     blockerCodes,
-    capacitySummary: null,
+    capacitySummary,
     positionSizing: null,
     buyAction: 'NO_ACTION',
     holdingRisk: holding ? 'REVIEW' : 'NONE',
@@ -530,7 +533,7 @@ export function evaluateDecision(input) {
     resolvedSnapshots,
   )
   if (capacitySummary === null) addBlocker(blockers, 'INVALID_PORTFOLIO_CAPACITY')
-  if (blockers.length > 0) return blockedRecord(canonicalInput, blockers)
+  if (blockers.length > 0) return blockedRecord(canonicalInput, blockers, capacitySummary)
 
   const currentWeight = capacitySummary.currentPosition.weight
   const holding = currentWeight > 0

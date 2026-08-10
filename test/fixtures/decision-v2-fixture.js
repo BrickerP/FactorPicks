@@ -1,28 +1,13 @@
-import { createHash } from 'node:crypto'
-import { createSnapshot } from '../../src/domain/contentAddressing.js'
+import { createSnapshot, digest, opaqueRef } from '../../src/domain/contentAddressing.js'
 import { derivePortfolioCapacitySnapshot } from '../../src/domain/portfolioCapacity.js'
 import { deriveEvidenceBundle } from '../../src/domain/evidence.js'
 import { deriveStructuredUnderwriting } from '../../src/domain/structuredUnderwriting.js'
+import { deriveTimingAssessment } from '../../src/domain/timingAssessment.js'
 import { capacityInput } from './portfolio-capacity-fixture.js'
-import { evidenceInput, underwritingInput } from './underwriting-fixture.js'
+import { evidenceInput, sourceSnapshot, underwritingInput } from './underwriting-fixture.js'
 
 export const NOW = '2026-08-09T08:00:00.000Z'
 export const SNAPSHOT_AS_OF = '2026-08-09T07:55:00.000Z'
-
-function canonicalize(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`
-  return `{${Object.keys(value).sort().map(key =>
-    `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`
-}
-
-export function digest(value) {
-  return `sha256:${createHash('sha256').update(canonicalize(value)).digest('hex')}`
-}
-
-export function opaqueRef(type, label) {
-  return `${type}:${createHash('sha256').update(label).digest('hex')}`
-}
 
 export function evidence(label, overrides = {}) {
   const id = opaqueRef('evidence', label)
@@ -62,6 +47,8 @@ const DEFAULT_EVIDENCE = [evidence('thesis'), evidence('valuation'), evidence('t
 export const EVIDENCE_DIGEST = digest(
   DEFAULT_EVIDENCE.map(evidenceProjection).sort((left, right) => left.id.localeCompare(right.id)),
 )
+
+export { digest, opaqueRef }
 
 export function valuationRange(overrides = {}) {
   return {
@@ -197,7 +184,51 @@ export function decisionInput(overrides = {}) {
     ['metric', 'operator', 'threshold', 'lookback', 'consecutive', 'source']
       .every(key => requestedPredicate[key] === null)
   const deriveRequestedRule = validMetricRule || validManualRule
-  const evidenceSeed = evidenceInput()
+  const requestedTimingStatus = overrides.timingAssessment?.status ?? 'PASS'
+  const requestedPrice = Number.isFinite(overrides.evaluatedPrice?.value)
+    ? overrides.evaluatedPrice.value
+    : 95
+  const source = sourceSnapshot({
+    facts: [
+      { factKey: 'REVENUE', value: 100, asOf: SNAPSHOT_AS_OF,
+        scope: { symbol: 'AAA' }, currency: 'USD' },
+      { factKey: 'OPERATING_MARGIN', value: 0.2, asOf: SNAPSHOT_AS_OF,
+        scope: { symbol: 'AAA' }, unit: 'ratio' },
+      { factKey: 'CURRENT_PRICE', value: requestedPrice, asOf: SNAPSHOT_AS_OF,
+        scope: { symbol: 'AAA' }, currency: 'USD' },
+      { factKey: 'TIMING_PASS', value: true, asOf: SNAPSHOT_AS_OF,
+        scope: { symbol: 'AAA' }, currency: 'USD' },
+      { factKey: 'TIMING_FAIL', value: false, asOf: SNAPSHOT_AS_OF,
+        scope: { symbol: 'AAA' }, currency: 'USD' },
+      { factKey: 'EVENT_RISK', value: true, asOf: SNAPSHOT_AS_OF,
+        scope: { symbol: 'AAA' }, currency: 'USD' },
+    ],
+  })
+  const evidenceSeed = evidenceInput({ resolvedSnapshots: [source.resolved] })
+  evidenceSeed.drafts = evidenceSeed.drafts.map(draft => draft.sourceRef
+    ? { ...draft, sourceRef: source.ref.id }
+    : draft)
+  evidenceSeed.drafts.push({ key: 'price', claimKey: 'PRICE', factKey: 'CURRENT_PRICE',
+    value: requestedPrice, sourceRef: source.ref.id, asOf: SNAPSHOT_AS_OF,
+    scope: { symbol: 'AAA' }, currency: 'USD', stance: 'SUPPORTS', confidence: 1 })
+  if (requestedTimingStatus === 'EVENT_RISK') {
+    evidenceSeed.drafts.push({ key: 'timing-pass', claimKey: 'TIMING_PASS', factKey: 'TIMING_PASS',
+      value: true, sourceRef: source.ref.id, asOf: SNAPSHOT_AS_OF, currency: 'USD',
+      scope: { symbol: 'AAA' }, stance: 'SUPPORTS', confidence: 1 })
+    evidenceSeed.drafts.push({ key: 'event-risk', claimKey: 'EVENT_RISK', factKey: 'EVENT_RISK',
+      value: true, sourceRef: source.ref.id, asOf: SNAPSHOT_AS_OF, currency: 'USD',
+      scope: { symbol: 'AAA' },
+      stance: 'SUPPORTS', confidence: 1 })
+  } else if (requestedTimingStatus === 'FAIL') {
+    evidenceSeed.drafts.push({ key: 'timing-fail', claimKey: 'TIMING_FAIL', factKey: 'TIMING_FAIL',
+      value: false, sourceRef: source.ref.id, asOf: SNAPSHOT_AS_OF, currency: 'USD',
+      scope: { symbol: 'AAA' }, stance: 'SUPPORTS', confidence: 1 })
+  } else {
+    evidenceSeed.drafts.push({ key: 'timing-pass', claimKey: 'TIMING_PASS', factKey: 'TIMING_PASS',
+      value: true, sourceRef: source.ref.id, asOf: SNAPSHOT_AS_OF, currency: 'USD',
+      scope: { symbol: 'AAA' },
+      stance: 'SUPPORTS', confidence: 1 })
+  }
   if (overrides.underwriting?.longTermGate === 'FAIL') {
     evidenceSeed.drafts[0].stance = 'CHALLENGES'
   }
@@ -216,6 +247,22 @@ export function decisionInput(overrides = {}) {
     }] : undefined,
   })
   const underwritingDerived = deriveStructuredUnderwriting(underwritingSeed)
+  const timingDerived = deriveTimingAssessment({
+    symbol: 'AAA', evaluatedAt: NOW, evidence: evidenceDerived.evidence,
+    resolvedSnapshots: evidenceSeed.resolvedSnapshots
+      .concat(evidenceDerived.resolvedSnapshots)
+      .concat(underwritingDerived.resolvedSnapshots),
+    policy: {
+      schemaVersion: 1,
+      currentPriceFactKey: 'CURRENT_PRICE',
+      passClaimKey: 'TIMING_PASS',
+      failClaimKey: 'TIMING_FAIL',
+      eventRiskClaimKey: 'EVENT_RISK',
+      maxAgeMs: 3_600_000,
+      maxFutureSkewMs: 60_000,
+      eventRiskReasonCode: 'EARNINGS_SOON',
+    },
+  })
   const input = {
     research: {
       symbol: 'AAA',
@@ -225,20 +272,10 @@ export function decisionInput(overrides = {}) {
       qualitySnapshot: snapshotEntries.quality.ref,
       researchSnapshot: snapshotEntries.research.ref,
     },
-    evaluatedPrice: {
-      value: 95,
-      currency: 'USD',
-      asOf: SNAPSHOT_AS_OF,
-      source: opaqueRef('source', 'consolidated-quote'),
-    },
+    evaluatedPrice: timingDerived.evaluatedPrice,
     evidence: evidenceDerived.evidence,
     underwriting: underwritingDerived.underwriting,
-    timingAssessment: {
-      status: 'PASS',
-      asOf: SNAPSHOT_AS_OF,
-      evidenceIds: [evidenceDerived.evidence.items[0].id],
-      reasonCodes: [],
-    },
+    timingAssessment: timingDerived.timingAssessment,
     portfolioCapacity: derivedCapacity.portfolioCapacity,
     decisionPolicy: {
       ...decisionPolicyValues,
@@ -250,10 +287,16 @@ export function decisionInput(overrides = {}) {
       .concat(derivedCapacity.resolvedSnapshots)
       .concat(evidenceSeed.resolvedSnapshots)
       .concat(evidenceDerived.resolvedSnapshots)
-      .concat(underwritingDerived.resolvedSnapshots),
+      .concat(underwritingDerived.resolvedSnapshots)
+      .concat(timingDerived.resolvedSnapshots),
     now: NOW,
   }
 
+  const timingOverride = overrides.timingAssessment ?? {}
+  const evaluatedPriceOverride = overrides.evaluatedPrice ?? {}
+  const trustedQuoteSource = evaluatedPriceOverride.source === opaqueRef('source', 'consolidated-quote')
+    ? input.evaluatedPrice.source
+    : evaluatedPriceOverride.source
   const merged = {
     ...input,
     ...overrides,
@@ -263,7 +306,9 @@ export function decisionInput(overrides = {}) {
         ? { longTermGate: input.underwriting.longTermGate }
         : {}),
       ...(deriveRequestedRule ? { invalidationRules: input.underwriting.invalidationRules } : {}) },
-    timingAssessment: { ...input.timingAssessment, ...overrides.timingAssessment },
+    timingAssessment: { ...input.timingAssessment, ...timingOverride },
+    evaluatedPrice: { ...input.evaluatedPrice, ...overrides.evaluatedPrice,
+      ...(trustedQuoteSource ? { source: trustedQuoteSource } : {}) },
     portfolioCapacity: input.portfolioCapacity,
     decisionPolicy: { ...input.decisionPolicy, ...overrides.decisionPolicy },
   }
