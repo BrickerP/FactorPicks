@@ -263,12 +263,7 @@ test('DecisionRecordV2 allow-lists every nested output field', () => {
   }
   assert.doesNotMatch(serialized, /resolvedSnapshots|payload/)
   assert.equal(result.dataStatus, 'EVALUATION_BLOCKED')
-  assert.deepEqual(Object.keys(result.timingAssessment).sort(), [
-    'asOf',
-    'evidenceIds',
-    'reasonCodes',
-    'status',
-  ])
+  assert.equal(result.timingAssessment, null)
 })
 
 test('invalidation rules enforce complete METRIC and MANUAL branches', () => {
@@ -639,6 +634,7 @@ test('external research and timing codes cannot persist arbitrary strings', () =
       reasonCodes: ['sentinel-private-code', 'EARNINGS_SOON'],
     },
   }))
-  assert.ok(timing.timingAssessment.reasonCodes.includes('TIMING_RESTRICTED'))
+  assert.equal(timing.timingAssessment, null)
+  assert.ok(timing.blockerCodes.includes('INVALID_TIMING_ASSESSMENT'))
   assert.doesNotMatch(JSON.stringify(timing), /sentinel-private-code/i)
 })

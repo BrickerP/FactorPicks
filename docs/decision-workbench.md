@@ -1,12 +1,33 @@
-# Target Architecture / Not yet fully implemented
+# Headless Decision Workbench
 
-This document describes the final non-UI architecture for FactorPicks. It is a target contract and migration plan, not a claim that the repository already implements every boundary below; existing CLI usage remains documented separately.
+This document is the current non-UI contract for FactorPicks. The repository has
+one local entry point, `npm run workbench -- [input.json|-]`; the workbench owns
+the complete raw-case-to-`DecisionRecordV2` path and may optionally append the
+sanitized record to an external private ledger. Identity verification establishes
+byte integrity and provenance binding, not external-source authenticity. This
+path has no network, broker, order, or public UI capability.
 
-Implemented headless seams include content-addressed Evidence and Structured
-Underwriting builders/projectors and the local `npm run underwriting --
-[input.json|-]` command. Identity verification establishes byte integrity and
-provenance binding, not external-source authenticity. This path has no network,
-ledger, broker, order, or public UI capability.
+The stage order is fixed:
+
+```text
+raw case
+  → evaluateResearch
+  → deriveEvidenceBundle
+  → deriveStructuredUnderwriting
+  → deriveTimingAssessment
+  → derivePortfolioCapacitySnapshot
+  → evaluateDecision
+```
+
+Callers submit only the canonical raw sections (`research: { universe,
+qualityManifest, policy }`, resolved `sourceSnapshots`, `evidence`, `underwriting`,
+`timing: { policy }`, `portfolio`, and `decisionPolicy`). Derived artifacts,
+evaluated price, timing status, capacity, sizing, and action are rebuilt
+internally. Top-level research aliases and nested `research.policy.research`
+are not accepted. Injected derived fields or an invalid top-level schema are input
+errors; semantic missing/stale/conflicting inputs return `EVALUATION_BLOCKED` +
+`NO_ACTION` with bounded codes. Malformed JSON, CLI arguments, or I/O remain
+process errors.
 
 Evidence timestamps are derived from resolved source facts and inference
 parents. Freshness is rechecked at each downstream boundary with
@@ -87,7 +108,7 @@ Evidence {
 }
 ```
 
-`reference` must identify a retrievable source without embedding credentials. A gate may be `PASS` or `FAIL` only when it names one or more applicable evidence IDs; otherwise the result is `Evaluation Blocked`, never an ungrounded status.
+`reference` must identify a retrievable source without embedding credentials. A gate may be `PASS` or `FAIL` only when it names one or more applicable evidence IDs; otherwise the result is `Evaluation Blocked`, never an ungrounded status. Timing claims are stricter: the pass, fail, and event-risk claims named by the timing policy must be directly `OBSERVED` source-backed Evidence and cannot reuse a long-term gate claim key.
 
 `sourceQuality` describes the source; `derivation` describes whether the observation is directly observed or inferred. These dimensions are independent and must not be collapsed into one quality value.
 
@@ -143,6 +164,33 @@ InvalidationRule {
 ```
 
 For `kind=METRIC`, the predicate is mechanically checkable from the named metric, operator, threshold, lookback, consecutive count, and source; `manualStatus` is `NOT_REQUIRED`. `kind=MANUAL` is allowed only with an explicit `manualStatus`, and the workbench never claims that a manual rule was automatically evaluated. `UNKNOWN` is not treated as `UNTRIGGERED` when the rule is material; missing evidence blocks evaluation or prohibits entry according to policy.
+
+The private underwriting snapshot retains the full condition, predicate, and
+response needed to re-evaluate a rule. The public `DecisionRecordV2` projection
+does not: each invalidation rule is reduced to its opaque rule ID, evidence
+references, bounded severity, and derived state. Free-form thesis text never
+reaches the record or external ledger.
+
+### TimingAssessment
+
+`deriveTimingAssessment` accepts only the exact raw policy fields: current-price,
+pass/fail/event-risk keys, freshness limits, and event-risk reason code. Aliases,
+defaults, and caller-supplied `requirePassSupport` are rejected; pass support is
+always required. The policy is stored as a content-addressed `TIMING_POLICY`
+snapshot. The builder then resolves Evidence and derives the only allowed
+current quote from exactly one fresh, non-conflicting `OBSERVED` current-price
+item for the same symbol in USD. Caller-supplied status, price, price evidence
+ID, reason codes, or timing artifact fields are rejected.
+
+The resulting content-addressed artifact binds the symbol, Evidence snapshot and
+digest, price evidence ID, status, as-of, evidence IDs, and bounded reason codes.
+`PASS`, `FAIL`, `EVENT_RISK`, and `BLOCKED` are derived from fresh support or
+challenge stances. A missing/stale/conflicting quote or missing required support
+is `BLOCKED`; a challenge (or explicit fail support) is `FAIL`; event-risk
+support is `EVENT_RISK`. Timing never changes the long-term gate. The projector
+re-resolves policy, Evidence, and artifact payloads and returns the canonical
+evaluated price plus assessment only when all identities and freshness checks
+still match.
 
 ### PortfolioCapacitySnapshot
 
@@ -313,7 +361,7 @@ The public pipeline may be cached, reviewed, and published without an account id
 
 By default, `PrivateLedger` stores only derived weights, action/risk outcomes, policy references, and snapshot/evidence references or digests. It does not store raw NLV, quantity, market value, or account ID. The private `SnapshotStore` is encrypted, content-addressed, and immutable; its retention cannot end before any referencing decision record, and deletion requires no remaining references. If an external system ever persists the raw private input bundle, that system must encrypt it and enforce an explicit retention policy; encrypted raw-bundle persistence is not implemented in the current target.
 
-The workbench is decision support only. It may read and normalize holdings, evaluate policy, and write a private `DecisionRecordV2`; it must not submit, schedule, amend, cancel, or simulate a broker order as if it had executed. Any future execution requires a separate, explicit, human-authorized system at the `Execution Boundary`.
+The workbench is decision support only. It may read and normalize holdings, evaluate policy, and write a private `DecisionRecordV2`; it must not submit, schedule, amend, cancel, or simulate a broker order as if it had executed. Any future execution requires a separate, explicit, human-authorized system at the `Execution Boundary`. If `--ledger` is used, the target must be an external owner-only (`0600`) regular file; symlinked targets/parents, repository paths, devices, and group/other-readable files are rejected.
 
 ## Migration order and deletion list
 

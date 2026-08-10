@@ -84,7 +84,7 @@ test('timing evidence references must be opaque, unique, and resolved in project
   ]) {
     const result = evaluateDecision(decisionInput({ timingAssessment: { evidenceIds } }))
     assert.equal(result.dataStatus, 'EVALUATION_BLOCKED')
-    assert.ok(result.blockerCodes.includes('INVALID_TIMING_EVIDENCE'))
+    assert.ok(result.blockerCodes.includes('INVALID_TIMING_ASSESSMENT'))
   }
 })
 
