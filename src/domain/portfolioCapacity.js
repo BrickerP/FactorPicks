@@ -1,8 +1,16 @@
-import { createHash } from 'node:crypto'
+import {
+  createSnapshot,
+  digest,
+  isDigest,
+  isOpaqueRef,
+  isSnapshotRef,
+  opaqueRef,
+  resolvedSnapshotsById,
+  sameCanonical,
+  snapshotIdentity,
+} from './contentAddressing.js'
 
 const TICKER_PATTERN = /^[A-Z][A-Z0-9.-]{0,9}$/
-const OPAQUE_REF_PATTERN = /^[a-z][a-z0-9-]*:[0-9a-f]{64}$/
-const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/
 const HARD_LIMIT_KEYS = [
   'userHardLimit',
   'systemRiskLimit',
@@ -40,22 +48,6 @@ function isTimestamp(value) {
   return isNonEmptyString(value) && Number.isFinite(Date.parse(value))
 }
 
-function isOpaqueRef(value) {
-  return isNonEmptyString(value) && OPAQUE_REF_PATTERN.test(value)
-}
-
-function isDigest(value) {
-  return isNonEmptyString(value) && DIGEST_PATTERN.test(value)
-}
-
-function isSnapshotRef(value) {
-  return isObject(value) && isOpaqueRef(value.id) &&
-    isOpaqueRef(value.version) && isDigest(value.digest)
-}
-
-function snapshotIdentity(value) {
-  return { id: value.id, version: value.version, digest: value.digest }
-}
 
 function isRatio(value, { positive = false } = {}) {
   return Number.isFinite(value) && (positive ? value > 0 : value >= 0) && value <= 1
@@ -66,37 +58,6 @@ function hasOnlyKeys(value, keys) {
     keys.every(key => Object.hasOwn(value, key))
 }
 
-function canonicalize(value) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
-    return JSON.stringify(value)
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) failInput()
-    return JSON.stringify(value)
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`
-  if (!isObject(value)) failInput()
-  return `{${Object.keys(value).sort().map(key =>
-    `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`
-}
-
-function digest(payload) {
-  return `sha256:${createHash('sha256').update(canonicalize(payload)).digest('hex')}`
-}
-
-function opaqueRef(kind, value) {
-  return `${kind}:${createHash('sha256').update(value).digest('hex')}`
-}
-
-function snapshot(kind, payload) {
-  const payloadDigest = digest(payload)
-  const id = opaqueRef(kind, payloadDigest)
-  const version = opaqueRef('version', `${kind}:1:${payloadDigest}`)
-  return {
-    ref: { id, version, digest: payloadDigest },
-    resolved: { id, version, payload },
-  }
-}
 
 function validateFreshness(asOf, evaluatedAt, maxAgeMs, maxFutureSkewMs) {
   if (!isTimestamp(asOf) || !isTimestamp(evaluatedAt) ||
@@ -267,13 +228,6 @@ function capacityProjection(portfolioCapacity) {
   }
 }
 
-function sameCanonical(left, right) {
-  try {
-    return canonicalize(left) === canonicalize(right)
-  } catch {
-    return false
-  }
-}
 
 export function derivePortfolioCapacitySnapshot(input) {
   if (!isObject(input)) failInput()
@@ -410,8 +364,8 @@ export function derivePortfolioCapacitySnapshot(input) {
     },
   }
   const metrics = computeCapacityMetrics(portfolioPayload, policyPayload)
-  const portfolioSnapshot = snapshot('portfolio', portfolioPayload)
-  const capacityPolicySnapshot = snapshot('capacity-policy', policyPayload)
+  const portfolioSnapshot = createSnapshot('portfolio', portfolioPayload)
+  const capacityPolicySnapshot = createSnapshot('capacity-policy', policyPayload)
   const projection = {
     asOf: portfolio.asOf,
     symbol,
@@ -440,24 +394,13 @@ export function derivePortfolioCapacitySnapshot(input) {
   }
 }
 
-function resolvedById(resolvedSnapshots) {
-  if (resolvedSnapshots instanceof Map) return resolvedSnapshots
-  if (!Array.isArray(resolvedSnapshots)) return null
-  const entries = new Map()
-  for (const resolved of resolvedSnapshots) {
-    if (!isObject(resolved) || entries.has(resolved.id)) return null
-    entries.set(resolved.id, resolved)
-  }
-  return entries
-}
-
 export function projectPortfolioCapacity(
   portfolioCapacity,
   expectedSymbol,
   resolvedSnapshots,
 ) {
   try {
-    const resolved = resolvedById(resolvedSnapshots)
+    const resolved = resolvedSnapshotsById(resolvedSnapshots)
     if (!resolved || !isObject(portfolioCapacity) || !isTicker(expectedSymbol) ||
         portfolioCapacity.symbol !== expectedSymbol ||
         portfolioCapacity.denominator?.kind !== 'NET_LIQUIDATION_VALUE' ||
@@ -471,11 +414,17 @@ export function projectPortfolioCapacity(
 
     const portfolioResolved = resolved.get(portfolioCapacity.portfolioSnapshotRef.id)
     const policyResolved = resolved.get(portfolioCapacity.capacityPolicyRef.id)
+    const expectedPortfolioSnapshot = portfolioResolved &&
+      createSnapshot('portfolio', portfolioResolved.payload)
+    const expectedPolicySnapshot = policyResolved &&
+      createSnapshot('capacity-policy', policyResolved.payload)
     if (!portfolioResolved || !policyResolved ||
         portfolioResolved.version !== portfolioCapacity.portfolioSnapshotRef.version ||
         policyResolved.version !== portfolioCapacity.capacityPolicyRef.version ||
         digest(portfolioResolved.payload) !== portfolioCapacity.portfolioSnapshotRef.digest ||
         digest(policyResolved.payload) !== portfolioCapacity.capacityPolicyRef.digest ||
+        !sameCanonical(expectedPortfolioSnapshot.resolved, portfolioResolved) ||
+        !sameCanonical(expectedPolicySnapshot.resolved, policyResolved) ||
         !validatePortfolioFacts(portfolioResolved.payload, expectedSymbol) ||
         !validatePolicyFacts(policyResolved.payload, portfolioResolved.payload.asOf) ||
         portfolioCapacity.asOf !== portfolioResolved.payload.asOf ||

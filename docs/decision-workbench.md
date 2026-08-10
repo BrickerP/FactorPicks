@@ -2,6 +2,23 @@
 
 This document describes the final non-UI architecture for FactorPicks. It is a target contract and migration plan, not a claim that the repository already implements every boundary below; existing CLI usage remains documented separately.
 
+Implemented headless seams include content-addressed Evidence and Structured
+Underwriting builders/projectors and the local `npm run underwriting --
+[input.json|-]` command. Identity verification establishes byte integrity and
+provenance binding, not external-source authenticity. This path has no network,
+ledger, broker, order, or public UI capability.
+
+Evidence timestamps are derived from resolved source facts and inference
+parents. Freshness is rechecked at each downstream boundary with
+`evidence.asOf <= underwriting.asOf <= decidedAt`. The resolved decision-policy
+payload is the sole authority for action and sizing; an outer artifact cannot
+override it.
+
+Downstream freshness applies to every Evidence item's `asOf` and `observedAt`,
+using the stricter of the Evidence policy and DecisionPolicy age/skew limits.
+Invalid timing input has no partial/raw fallback in a blocked record: its public
+projection is `null`.
+
 ## Product goal and action language
 
 The workbench helps an investor answer four questions for a security: what is observable now, does the long-term case hold, is entry acceptable at the current price and timing, and how much room remains in the portfolio? It produces an auditable private decision record for human review; it never places an order.

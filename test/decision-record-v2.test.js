@@ -45,7 +45,7 @@ test('missing stale or unresolvable evidence blocks evaluation without sizing', 
           items: [evidence('valuation'), evidence('timing')],
         },
       }),
-      blockerCode: 'MISSING_EVIDENCE_REFERENCE',
+      blockerCode: 'INVALID_EVIDENCE_BUNDLE',
     },
     {
       name: 'stale evidence',
@@ -59,7 +59,7 @@ test('missing stale or unresolvable evidence blocks evaluation without sizing', 
           ],
         },
       }),
-      blockerCode: 'STALE_EVIDENCE',
+      blockerCode: 'INVALID_EVIDENCE_BUNDLE',
     },
     {
       name: 'unresolvable evidence source',
@@ -73,7 +73,7 @@ test('missing stale or unresolvable evidence blocks evaluation without sizing', 
           ],
         },
       }),
-      blockerCode: 'INVALID_EVIDENCE_SOURCE_REFERENCE',
+      blockerCode: 'INVALID_EVIDENCE_BUNDLE',
     },
   ]
 
@@ -262,10 +262,7 @@ test('DecisionRecordV2 allow-lists every nested output field', () => {
     assert.doesNotMatch(serialized, new RegExp(forbidden, 'i'), forbidden)
   }
   assert.doesNotMatch(serialized, /resolvedSnapshots|payload/)
-  assert.deepEqual(Object.keys(result.capacitySummary.currentPosition).sort(), [
-    'positionRef',
-    'weight',
-  ])
+  assert.equal(result.dataStatus, 'EVALUATION_BLOCKED')
   assert.deepEqual(Object.keys(result.timingAssessment).sort(), [
     'asOf',
     'evidenceIds',
@@ -309,7 +306,7 @@ test('invalidation rules enforce complete METRIC and MANUAL branches', () => {
     const result = evaluateDecision(decisionInput({
       underwriting: { invalidationRules: [rule] },
     }))
-    assertBlocked(result, 'INVALID_INVALIDATION_RULE')
+    assertBlocked(result, 'INVALID_STRUCTURED_UNDERWRITING')
   }
 
   const confirmed = evaluateDecision(decisionInput({
@@ -463,12 +460,12 @@ test('invalid ranges and incomplete capacity facts block the public seam', () =>
   invalidValuation.underwriting.valuationRange.low = 130
   invalidValuation.underwriting.entryRange.derivedFrom.low = 130
   const valuationResult = evaluateDecision(invalidValuation)
-  assert.ok(valuationResult.blockerCodes.includes('INVALID_VALUATION_RANGE'))
+  assert.ok(valuationResult.blockerCodes.includes('INVALID_STRUCTURED_UNDERWRITING'))
 
   const invalidEntry = decisionInput()
   invalidEntry.underwriting.entryRange.lower = 110
   const entryResult = evaluateDecision(invalidEntry)
-  assert.ok(entryResult.blockerCodes.includes('INVALID_ENTRY_RANGE'))
+  assert.ok(entryResult.blockerCodes.includes('INVALID_STRUCTURED_UNDERWRITING'))
 
   for (const field of [
     'userHardLimit',
@@ -497,38 +494,38 @@ test('evidence and invalidation observations enforce freshness and temporal orde
     {
       name: 'stale evidence observation',
       mutate(input) { input.evidence.items[0].observedAt = '2020-01-01T00:00:00.000Z' },
-      blockerCode: 'STALE_EVIDENCE',
+      blockerCode: 'INVALID_EVIDENCE_BUNDLE',
     },
     {
       name: 'future evidence observation',
       mutate(input) { input.evidence.items[0].observedAt = '2026-08-09T08:05:00.000Z' },
-      blockerCode: 'FUTURE_EVIDENCE',
+      blockerCode: 'INVALID_EVIDENCE_BUNDLE',
     },
     {
       name: 'evidence observed before its as-of',
       mutate(input) { input.evidence.items[0].observedAt = '2026-08-09T07:54:00.000Z' },
-      blockerCode: 'INCOHERENT_EVIDENCE_AS_OF',
+      blockerCode: 'INVALID_EVIDENCE_BUNDLE',
     },
     {
       name: 'stale invalidation observation',
       mutate(input) {
         input.underwriting.invalidationRules[0].observedAt = '2020-01-01T00:00:00.000Z'
       },
-      blockerCode: 'STALE_INVALIDATION_OBSERVATION',
+      blockerCode: 'INVALID_STRUCTURED_UNDERWRITING',
     },
     {
       name: 'future invalidation observation',
       mutate(input) {
         input.underwriting.invalidationRules[0].observedAt = '2026-08-09T08:05:00.000Z'
       },
-      blockerCode: 'FUTURE_INVALIDATION_OBSERVATION',
+      blockerCode: 'INVALID_STRUCTURED_UNDERWRITING',
     },
     {
       name: 'invalidation observed before derived facts',
       mutate(input) {
         input.underwriting.invalidationRules[0].observedAt = '2026-08-09T07:54:00.000Z'
       },
-      blockerCode: 'INCOHERENT_INVALIDATION_AS_OF',
+      blockerCode: 'INVALID_STRUCTURED_UNDERWRITING',
     },
   ]
 
@@ -586,7 +583,7 @@ test('persisted identifiers reject plaintext and credential-bearing references',
   }
 })
 
-test('metric invalidation thresholds accept strings and null only for equality', () => {
+test('final invalidation artifacts cannot replace builder-derived thresholds', () => {
   for (const threshold of ['BBB-', null]) {
     const result = evaluateDecision(decisionInput({
       underwriting: {
@@ -599,7 +596,7 @@ test('metric invalidation thresholds accept strings and null only for equality',
         })],
       },
     }))
-    assert.equal(result.dataStatus, 'VALID', String(threshold))
+    assertBlocked(result, 'INVALID_STRUCTURED_UNDERWRITING', String(threshold))
   }
 
   const invalidNullOrdering = evaluateDecision(decisionInput({
@@ -609,24 +606,21 @@ test('metric invalidation thresholds accept strings and null only for equality',
       })],
     },
   }))
-  assert.ok(invalidNullOrdering.blockerCodes.includes('INVALID_INVALIDATION_RULE'))
+  assert.ok(invalidNullOrdering.blockerCodes.includes('INVALID_STRUCTURED_UNDERWRITING'))
 })
 
 test('evidence digest binds the allow-listed normalized evidence set', () => {
   const cases = [
-    input => { input.evidence.items[0].claim = 'Tampered claim' },
+    input => { input.evidence.items[0].claimKey = 'TAMPERED' },
     input => { input.evidence.items[0].stance = 'CHALLENGES' },
-    input => {
-      input.evidence.items[0].source.reference =
-        'https://example.test/evidence/tampered'
-    },
+    input => { input.evidence.items[0].sourceRef = opaqueRef('source', 'tampered') },
   ]
 
   for (const mutate of cases) {
     const input = decisionInput()
     mutate(input)
     const result = evaluateDecision(input)
-    assertBlocked(result, 'EVIDENCE_DIGEST_MISMATCH')
+    assertBlocked(result, 'INVALID_EVIDENCE_BUNDLE')
   }
 })
 

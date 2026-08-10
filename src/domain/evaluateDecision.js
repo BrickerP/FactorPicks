@@ -1,18 +1,18 @@
-import { createHash } from 'node:crypto'
+import {
+  createSnapshot,
+  digest as payloadDigest,
+  isDigest,
+  isOpaqueRef,
+  isSnapshotRef,
+  resolvedSnapshotsById,
+  sameCanonical,
+  snapshotIdentity as contentSnapshotIdentity,
+} from './contentAddressing.js'
+import { classifyEvidenceFreshness, projectEvidenceBundle } from './evidence.js'
 import { projectPortfolioCapacity } from './portfolioCapacity.js'
+import { projectStructuredUnderwriting } from './structuredUnderwriting.js'
 
-const LONG_TERM_GATE_STATUSES = new Set(['PASS', 'FAIL', 'BLOCKED'])
 const TIMING_STATUSES = new Set(['PASS', 'EVENT_RISK', 'FAIL', 'BLOCKED'])
-const INVALIDATION_STATES = new Set(['UNTRIGGERED', 'TRIGGERED', 'UNKNOWN'])
-const INVALIDATION_SEVERITIES = new Set(['REVIEW', 'PROHIBIT_ENTRY', 'EXIT_REVIEW'])
-const INVALIDATION_OPERATORS = new Set(['GT', 'GTE', 'LT', 'LTE', 'EQ', 'NEQ'])
-const MANUAL_STATE_BY_STATUS = Object.freeze({
-  PENDING: 'UNKNOWN',
-  CONFIRMED: 'TRIGGERED',
-  REJECTED: 'UNTRIGGERED',
-})
-const OPAQUE_REF_PATTERN = /^[a-z][a-z0-9-]*:[0-9a-f]{64}$/
-const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/
 const RESEARCH_BLOCKER_CODES = new Set([
   'EMPTY_MANIFEST_RESULTS',
   'FAILED_SYMBOL_COUNT_CONFLICT',
@@ -58,13 +58,6 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0
 }
 
-function isOpaqueRef(value) {
-  return isNonEmptyString(value) && OPAQUE_REF_PATTERN.test(value)
-}
-
-function isDigest(value) {
-  return isNonEmptyString(value) && DIGEST_PATTERN.test(value)
-}
 
 function isTimestamp(value) {
   return isNonEmptyString(value) && Number.isFinite(Date.parse(value))
@@ -89,30 +82,6 @@ function validateTemporalValue({
   return true
 }
 
-function isSnapshotRef(value) {
-  return isObject(value) &&
-    isOpaqueRef(value.id) &&
-    isOpaqueRef(value.version) &&
-    isDigest(value.digest)
-}
-
-function canonicalize(value) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
-    return JSON.stringify(value)
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new TypeError('Snapshot payload numbers must be finite')
-    return JSON.stringify(value)
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`
-  if (!isObject(value)) throw new TypeError('Snapshot payload must be JSON-compatible')
-  return `{${Object.keys(value).sort().map(key =>
-    `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`
-}
-
-function payloadDigest(payload) {
-  return `sha256:${createHash('sha256').update(canonicalize(payload)).digest('hex')}`
-}
 
 function addBlocker(blockers, code) {
   if (!blockers.includes(code)) blockers.push(code)
@@ -132,13 +101,26 @@ function normalizeExternalCodes(codes, allowedCodes, fallbackCode, fallbackWhenE
 }
 
 function snapshotIdentity(value) {
-  return isObject(value)
-    ? {
-        id: isOpaqueRef(value.id) ? value.id : null,
-        version: isOpaqueRef(value.version) ? value.version : null,
-        digest: isDigest(value.digest) ? value.digest : null,
-      }
-    : null
+  return isSnapshotRef(value) ? contentSnapshotIdentity(value) : null
+}
+
+function projectDecisionPolicy(value, expectedSymbol, resolvedSnapshots) {
+  try {
+    if (!isObject(value) || !isSnapshotRef(value.ref)) return null
+    const resolved = resolvedSnapshotsById(resolvedSnapshots)
+    const item = resolved?.get(value.ref.id)
+    if (!item || !sameCanonical(createSnapshot('decision-policy', item.payload).resolved, item)) {
+      return null
+    }
+    const payload = item.payload
+    if (payload?.role !== 'DECISION_POLICY' || payload.kind !== 'DECISION_POLICY' ||
+        payload.schemaVersion !== 1 || payload.symbol !== expectedSymbol ||
+        payload.currency !== 'USD' || !isTimestamp(payload.asOf) || !isObject(payload.policy)) {
+      return null
+    }
+    const projected = { ...payload.policy, ref: contentSnapshotIdentity(value.ref) }
+    return sameCanonical(value, projected) ? projected : null
+  } catch { return null }
 }
 
 function evaluatedPriceRecord(value) {
@@ -206,6 +188,7 @@ function invalidationRuleRecord(rule) {
     manualStatus: rule?.manualStatus,
     severity: rule?.severity,
     state: rule?.state,
+    derivedFromAsOf: rule?.derivedFromAsOf,
     observedAt: rule?.observedAt,
     response: rule?.response,
   }
@@ -230,6 +213,7 @@ function timingAssessmentRecord(value) {
 }
 
 function underwritingRecord(underwriting = {}) {
+  if (!underwriting) return null
   return {
     longTermGate: underwriting.longTermGate ?? 'BLOCKED',
     evidenceIds: Array.isArray(underwriting.evidenceIds)
@@ -248,7 +232,7 @@ function commonRecord(input) {
     research = {},
     evaluatedPrice,
     evidence,
-    underwriting = {},
+    underwriting,
     timingAssessment,
     decisionPolicy,
     now,
@@ -262,7 +246,7 @@ function commonRecord(input) {
     marketSnapshot: snapshotIdentity(research.marketSnapshot),
     qualitySnapshot: snapshotIdentity(research.qualitySnapshot),
     researchSnapshot: snapshotIdentity(research.researchSnapshot),
-    underwritingSnapshot: snapshotIdentity(underwriting.snapshotRef),
+    underwritingSnapshot: snapshotIdentity(underwriting?.snapshotRef),
     evidence: {
       digest: isDigest(evidence?.digest) ? evidence.digest : null,
       refs: Array.isArray(evidence?.items)
@@ -275,220 +259,11 @@ function commonRecord(input) {
   }
 }
 
-function requiredEvidenceIds(underwriting = {}, timingAssessment = {}) {
-  return new Set([
-    ...(underwriting.evidenceIds ?? []),
-    ...(underwriting.valuationRange?.evidenceIds ?? []),
-    ...(underwriting.entryRange?.evidenceIds ?? []),
-    ...(underwriting.invalidationRules ?? []).flatMap(rule => rule?.evidenceIds ?? []),
-    ...(timingAssessment.evidenceIds ?? []),
-  ])
-}
-
-function evidenceProjection(item) {
-  const scope = { symbol: item?.scope?.symbol }
-  if (isNonEmptyString(item?.scope?.universe)) scope.universe = item.scope.universe
-  return {
-    id: item?.id,
-    claim: item?.claim,
-    source: { kind: item?.source?.kind, reference: item?.source?.reference },
-    observedAt: item?.observedAt,
-    asOf: item?.asOf,
-    scope,
-    stance: item?.stance,
-    sourceQuality: item?.sourceQuality,
-    derivation: item?.derivation,
-    confidence: item?.confidence,
-  }
-}
-
-function validateEvidence(input, blockers) {
-  const { evidence, underwriting, timingAssessment, research, decisionPolicy, now } = input
-  if (!isDigest(evidence?.digest) || !Array.isArray(evidence?.items)) {
-    addBlocker(blockers, 'MISSING_EVIDENCE')
-    return
-  }
-  if (!Number.isFinite(decisionPolicy?.maxInputAgeMs) ||
-      decisionPolicy.maxInputAgeMs < 0 ||
-      !Number.isFinite(decisionPolicy?.maxFutureSkewMs) ||
-      decisionPolicy.maxFutureSkewMs < 0 || !isTimestamp(now)) {
-    addBlocker(blockers, 'INVALID_EVIDENCE_POLICY')
-    return
-  }
-
-  const ids = new Set()
-  for (const item of evidence.items) {
-    if (!isOpaqueRef(item?.id) || ids.has(item.id)) {
-      addBlocker(blockers, 'INVALID_EVIDENCE_ID')
-      continue
-    }
-    ids.add(item.id)
-    if (!isNonEmptyString(item.claim) ||
-        !isNonEmptyString(item?.source?.kind) ||
-        !isNonEmptyString(item?.source?.reference)) {
-      addBlocker(blockers, 'INVALID_EVIDENCE_SOURCE_REFERENCE')
-    }
-    if (item?.scope?.symbol !== research?.symbol) {
-      addBlocker(blockers, 'EVIDENCE_SCOPE_MISMATCH')
-    }
-    const asOfValid = validateTemporalValue({
-      value: item.asOf,
-      now,
-      policy: decisionPolicy,
-      blockers,
-      invalidCode: 'INVALID_EVIDENCE_TIMESTAMP',
-      staleCode: 'STALE_EVIDENCE',
-      futureCode: 'FUTURE_EVIDENCE',
-    })
-    const observedAtValid = validateTemporalValue({
-      value: item.observedAt,
-      now,
-      policy: decisionPolicy,
-      blockers,
-      invalidCode: 'INVALID_EVIDENCE_TIMESTAMP',
-      staleCode: 'STALE_EVIDENCE',
-      futureCode: 'FUTURE_EVIDENCE',
-    })
-    if (asOfValid && observedAtValid && Date.parse(item.observedAt) < Date.parse(item.asOf)) {
-      addBlocker(blockers, 'INCOHERENT_EVIDENCE_AS_OF')
-    }
-    if (!['SUPPORTS', 'CHALLENGES'].includes(item.stance) ||
-        !['PRIMARY', 'SECONDARY'].includes(item.sourceQuality) ||
-        !['OBSERVED', 'INFERRED'].includes(item.derivation) ||
-        !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) {
-      addBlocker(blockers, 'INVALID_EVIDENCE')
-    }
-  }
-
-  for (const evidenceId of requiredEvidenceIds(underwriting, timingAssessment)) {
-    if (!isOpaqueRef(evidenceId)) addBlocker(blockers, 'INVALID_EVIDENCE_REFERENCE')
-    else if (!ids.has(evidenceId)) addBlocker(blockers, 'MISSING_EVIDENCE_REFERENCE')
-  }
-  try {
-    const normalizedItems = evidence.items
-      .map(evidenceProjection)
-      .sort((left, right) => String(left.id).localeCompare(String(right.id)))
-    if (payloadDigest(normalizedItems) !== evidence.digest) {
-      addBlocker(blockers, 'EVIDENCE_DIGEST_MISMATCH')
-    }
-  } catch {
-    addBlocker(blockers, 'EVIDENCE_DIGEST_MISMATCH')
-  }
-}
-
-function validateRanges(input, blockers) {
-  const { underwriting = {}, evaluatedPrice } = input
-  const valuation = underwriting.valuationRange
-  const entry = underwriting.entryRange
-
-  if (!isObject(valuation) ||
-      ![valuation.low, valuation.base, valuation.high].every(Number.isFinite) ||
-      valuation.low > valuation.base || valuation.base > valuation.high ||
-      !isNonEmptyString(valuation.currency) || !isTimestamp(valuation.asOf) ||
-      !isNonEmptyString(valuation.method) || !isNonEmptyString(valuation.uncertainty) ||
-      !Array.isArray(valuation.evidenceIds) || valuation.evidenceIds.length === 0) {
-    addBlocker(blockers, 'INVALID_VALUATION_RANGE')
-  }
-
-  if (!isObject(entry) ||
-      !Number.isFinite(entry.lower) || !Number.isFinite(entry.upper) ||
-      entry.lower > entry.upper || !isNonEmptyString(entry.currency) ||
-      !isTimestamp(entry.asOf) || !Number.isFinite(entry.marginOfSafety) ||
-      entry.marginOfSafety < 0 || entry.marginOfSafety > 1 ||
-      !Array.isArray(entry.evidenceIds) || entry.evidenceIds.length === 0 ||
-      !isObject(entry.derivedFrom)) {
-    addBlocker(blockers, 'INVALID_ENTRY_RANGE')
-  }
-
-  if (isObject(valuation) && isObject(entry) &&
-      (valuation.currency !== entry.currency ||
-       JSON.stringify(entry.derivedFrom) !== JSON.stringify(valuation))) {
-    addBlocker(blockers, 'ENTRY_RANGE_PROVENANCE_MISMATCH')
-  }
-
-  if (!isObject(evaluatedPrice) || !Number.isFinite(evaluatedPrice.value) ||
-      evaluatedPrice.value < 0 || !isNonEmptyString(evaluatedPrice.currency) ||
-      !isTimestamp(evaluatedPrice.asOf) || !isOpaqueRef(evaluatedPrice.source)) {
-    addBlocker(blockers, 'INVALID_EVALUATED_PRICE')
-  } else if (isObject(entry) && evaluatedPrice.currency !== entry.currency) {
-    addBlocker(blockers, 'PRICE_CURRENCY_MISMATCH')
-  }
-}
-
-function validateInvalidationRules(underwriting = {}, decisionPolicy, now, blockers) {
-  if (!Array.isArray(underwriting.invalidationRules)) {
-    addBlocker(blockers, 'INVALID_INVALIDATION_RULES')
-    return
-  }
-
-  for (const rule of underwriting.invalidationRules) {
-    const baseValid = isOpaqueRef(rule?.id) &&
-      isNonEmptyString(rule?.condition) &&
-      Array.isArray(rule?.evidenceIds) && rule.evidenceIds.length > 0 &&
-      INVALIDATION_SEVERITIES.has(rule?.severity) &&
-      INVALIDATION_STATES.has(rule?.state) &&
-      isTimestamp(rule?.derivedFromAsOf) &&
-      isTimestamp(rule?.observedAt) &&
-      isNonEmptyString(rule?.response) &&
-      isObject(rule?.predicate)
-    if (!baseValid) {
-      addBlocker(blockers, 'INVALID_INVALIDATION_RULE')
-      continue
-    }
-
-    const predicate = rule.predicate
-    let branchValid = false
-    if (predicate.kind === 'METRIC') {
-      const thresholdValid = Number.isFinite(predicate.threshold) ||
-        (isNonEmptyString(predicate.threshold) && predicate.threshold.trim().length > 0) ||
-        predicate.threshold === null
-      const nullThresholdAllowed = ['EQ', 'NEQ'].includes(predicate.operator)
-      branchValid = isNonEmptyString(predicate.metric) &&
-        INVALIDATION_OPERATORS.has(predicate.operator) &&
-        thresholdValid && (predicate.threshold !== null || nullThresholdAllowed) &&
-        isNonEmptyString(predicate.lookback) &&
-        Number.isInteger(predicate.consecutive) && predicate.consecutive > 0 &&
-        isNonEmptyString(predicate.source) && rule.manualStatus === 'NOT_REQUIRED'
-    } else if (predicate.kind === 'MANUAL') {
-      branchValid = Object.hasOwn(MANUAL_STATE_BY_STATUS, rule.manualStatus) &&
-        MANUAL_STATE_BY_STATUS[rule.manualStatus] === rule.state &&
-        ['metric', 'operator', 'threshold', 'lookback', 'consecutive', 'source']
-          .every(key => predicate[key] === null)
-    }
-
-    if (!branchValid) {
-      addBlocker(blockers, 'INVALID_INVALIDATION_RULE')
-      continue
-    }
-    if (decisionPolicy) {
-      validateTemporalValue({
-        value: rule.derivedFromAsOf,
-        now,
-        policy: decisionPolicy,
-        blockers,
-        invalidCode: 'INVALID_INVALIDATION_RULE',
-        staleCode: 'STALE_INVALIDATION_OBSERVATION',
-        futureCode: 'FUTURE_INVALIDATION_OBSERVATION',
-      })
-      validateTemporalValue({
-        value: rule.observedAt,
-        now,
-        policy: decisionPolicy,
-        blockers,
-        invalidCode: 'INVALID_INVALIDATION_RULE',
-        staleCode: 'STALE_INVALIDATION_OBSERVATION',
-        futureCode: 'FUTURE_INVALIDATION_OBSERVATION',
-      })
-    }
-    if (Date.parse(rule.observedAt) < Date.parse(rule.derivedFromAsOf)) {
-      addBlocker(blockers, 'INCOHERENT_INVALIDATION_AS_OF')
-    }
-    if (rule.state === 'UNKNOWN') addBlocker(blockers, 'UNKNOWN_INVALIDATION_STATE')
-  }
-}
-
 function validateSnapshotRefs(input, blockers) {
-  const { research = {}, underwriting = {}, portfolioCapacity = {}, decisionPolicy = {} } = input
+  const research = input.research ?? {}
+  const underwriting = input.underwriting ?? {}
+  const portfolioCapacity = input.portfolioCapacity ?? {}
+  const decisionPolicy = input.decisionPolicy ?? {}
   const refs = [
     research.marketSnapshot,
     research.qualitySnapshot,
@@ -498,17 +273,10 @@ function validateSnapshotRefs(input, blockers) {
     portfolioCapacity.capacityPolicyRef,
     decisionPolicy.ref,
   ]
-  const resolvedSnapshots = Array.isArray(input.resolvedSnapshots)
-    ? input.resolvedSnapshots
-    : []
-  const resolvedById = new Map()
-  for (const resolved of resolvedSnapshots) {
-    if (!isObject(resolved) || !isOpaqueRef(resolved.id)) continue
-    if (resolvedById.has(resolved.id)) {
-      addBlocker(blockers, 'DUPLICATE_RESOLVED_SNAPSHOT_ID')
-      continue
-    }
-    resolvedById.set(resolved.id, resolved)
+  const resolvedById = resolvedSnapshotsById(input.resolvedSnapshots)
+  if (!resolvedById) {
+    addBlocker(blockers, 'DUPLICATE_RESOLVED_SNAPSHOT_ID')
+    return new Map()
   }
   for (const ref of refs) {
     if (!isSnapshotRef(ref)) {
@@ -598,30 +366,80 @@ function validateDecisionInputs(input) {
     )
     for (const code of researchBlockers) addBlocker(blockers, code)
   }
-  validateEvidence(input, blockers)
-  if (!LONG_TERM_GATE_STATUSES.has(underwriting.longTermGate) ||
-      underwriting.longTermGate === 'BLOCKED' ||
-      !Array.isArray(underwriting.evidenceIds) || underwriting.evidenceIds.length === 0) {
+  const projectedDecisionPolicy = projectDecisionPolicy(
+    decisionPolicy,
+    research.symbol,
+    input.resolvedSnapshots,
+  )
+  if (!projectedDecisionPolicy) addBlocker(blockers, 'INVALID_DECISION_POLICY')
+
+  const evidenceFreshness = classifyEvidenceFreshness(input.evidence, input.resolvedSnapshots, {
+    evaluatedAt: input.now,
+    maxInputAgeMs: projectedDecisionPolicy?.maxInputAgeMs,
+    maxFutureSkewMs: projectedDecisionPolicy?.maxFutureSkewMs,
+  })
+  if (evidenceFreshness === 'STALE') addBlocker(blockers, 'STALE_EVIDENCE_BUNDLE')
+  if (evidenceFreshness === 'FUTURE') addBlocker(blockers, 'FUTURE_EVIDENCE_BUNDLE')
+  const projectedEvidence = projectEvidenceBundle(
+    input.evidence,
+    research.symbol,
+    input.resolvedSnapshots,
+    { evaluatedAt: input.now,
+      maxInputAgeMs: projectedDecisionPolicy?.maxInputAgeMs,
+      maxFutureSkewMs: projectedDecisionPolicy?.maxFutureSkewMs },
+  )
+  if (!projectedEvidence) addBlocker(blockers, 'INVALID_EVIDENCE_BUNDLE')
+  const projectedUnderwriting = projectedEvidence && projectStructuredUnderwriting(
+    underwriting,
+    research.symbol,
+    projectedEvidence,
+    input.resolvedSnapshots,
+    { evaluatedAt: input.now,
+      maxInputAgeMs: projectedDecisionPolicy?.maxInputAgeMs,
+      maxFutureSkewMs: projectedDecisionPolicy?.maxFutureSkewMs },
+  )
+  if (!projectedUnderwriting) addBlocker(blockers, 'INVALID_STRUCTURED_UNDERWRITING')
+  if (projectedUnderwriting?.longTermGate === 'BLOCKED') {
     addBlocker(blockers, 'INVALID_LONG_TERM_GATE')
   }
-  validateRanges(input, blockers)
-  validateInvalidationRules(underwriting, decisionPolicy, input.now, blockers)
-  if (!TIMING_STATUSES.has(timingAssessment.status) || timingAssessment.status === 'BLOCKED' ||
-      !isTimestamp(timingAssessment.asOf) ||
-      !Array.isArray(timingAssessment.evidenceIds) || timingAssessment.evidenceIds.length === 0 ||
-      !Array.isArray(timingAssessment.reasonCodes)) {
+  if (projectedUnderwriting?.invalidationRules.some(rule => rule.state === 'UNKNOWN')) {
+    addBlocker(blockers, 'UNKNOWN_INVALIDATION_STATE')
+  }
+  const evaluatedPriceValid = isObject(input.evaluatedPrice) &&
+    Number.isFinite(input.evaluatedPrice.value) && input.evaluatedPrice.value > 0 &&
+    input.evaluatedPrice.currency === 'USD' && isTimestamp(input.evaluatedPrice.asOf) &&
+    isOpaqueRef(input.evaluatedPrice.source) && (!projectedUnderwriting ||
+      input.evaluatedPrice.currency === projectedUnderwriting.entryRange.currency)
+  if (!evaluatedPriceValid) addBlocker(blockers, 'INVALID_EVALUATED_PRICE')
+  const timingShapeValid = TIMING_STATUSES.has(timingAssessment.status) &&
+      timingAssessment.status !== 'BLOCKED' &&
+      isTimestamp(timingAssessment.asOf) &&
+      Array.isArray(timingAssessment.evidenceIds) && timingAssessment.evidenceIds.length > 0 &&
+      Array.isArray(timingAssessment.reasonCodes)
+  if (!timingShapeValid) {
     addBlocker(blockers, 'INVALID_TIMING_ASSESSMENT')
   }
-  if (!Number.isFinite(decisionPolicy.targetPosition) || decisionPolicy.targetPosition < 0 ||
-      !Number.isFinite(decisionPolicy.pilotPositionLimit) || decisionPolicy.pilotPositionLimit <= 0 ||
-      typeof decisionPolicy.permitPilotOnEventRisk !== 'boolean' ||
-      !Number.isFinite(decisionPolicy.maxInputAgeMs) || decisionPolicy.maxInputAgeMs < 0 ||
-      !Number.isFinite(decisionPolicy.maxFutureSkewMs) || decisionPolicy.maxFutureSkewMs < 0) {
+  const timingIds = timingAssessment.evidenceIds
+  const evidenceIds = new Set(projectedEvidence?.items?.map(item => item.id) ?? [])
+  const timingEvidenceValid = Array.isArray(timingIds) &&
+    new Set(timingIds).size === timingIds.length &&
+    timingIds.every(id => isOpaqueRef(id) && evidenceIds.has(id))
+  if (!timingEvidenceValid) addBlocker(blockers, 'INVALID_TIMING_EVIDENCE')
+  const projectedTimingAssessment = timingShapeValid && timingEvidenceValid
+    ? timingAssessmentRecord(timingAssessment)
+    : null
+  if (!projectedDecisionPolicy ||
+      !Number.isFinite(projectedDecisionPolicy.targetPosition) || projectedDecisionPolicy.targetPosition < 0 ||
+      !Number.isFinite(projectedDecisionPolicy.pilotPositionLimit) || projectedDecisionPolicy.pilotPositionLimit <= 0 ||
+      typeof projectedDecisionPolicy.permitPilotOnEventRisk !== 'boolean' ||
+      !Number.isFinite(projectedDecisionPolicy.maxInputAgeMs) || projectedDecisionPolicy.maxInputAgeMs < 0 ||
+      !Number.isFinite(projectedDecisionPolicy.maxFutureSkewMs) || projectedDecisionPolicy.maxFutureSkewMs < 0) {
     addBlocker(blockers, 'INVALID_DECISION_POLICY')
   }
-  validateTemporalInputs(input, blockers)
+  validateTemporalInputs({ ...input, decisionPolicy: projectedDecisionPolicy ?? {} }, blockers)
 
-  return blockers
+  return { blockers, projectedEvidence, projectedUnderwriting, projectedDecisionPolicy,
+    projectedTimingAssessment, evaluatedPriceValid }
 }
 
 function positionSizingFor(decisionPolicy, capacitySummary, targetCap = Infinity) {
@@ -691,33 +509,46 @@ function prohibitedForHolding(
 }
 
 export function evaluateDecision(input) {
-  const blockers = validateDecisionInputs(input)
+  const validation = validateDecisionInputs(input)
+  const blockers = validation.blockers
+  const canonicalInput = validation.projectedEvidence && validation.projectedUnderwriting &&
+    validation.projectedDecisionPolicy && validation.projectedTimingAssessment &&
+    validation.evaluatedPriceValid
+    ? { ...input, evidence: validation.projectedEvidence,
+        underwriting: validation.projectedUnderwriting,
+        decisionPolicy: validation.projectedDecisionPolicy,
+        timingAssessment: validation.projectedTimingAssessment }
+    : { ...input, evidence: validation.projectedEvidence,
+        underwriting: validation.projectedUnderwriting,
+        decisionPolicy: validation.projectedDecisionPolicy,
+        timingAssessment: validation.projectedTimingAssessment,
+        evaluatedPrice: null }
   const resolvedSnapshots = validateSnapshotRefs(input, blockers)
   const capacitySummary = projectPortfolioCapacity(
-    input.portfolioCapacity,
-    input.research?.symbol,
+    canonicalInput.portfolioCapacity,
+    canonicalInput.research?.symbol,
     resolvedSnapshots,
   )
   if (capacitySummary === null) addBlocker(blockers, 'INVALID_PORTFOLIO_CAPACITY')
-  if (blockers.length > 0) return blockedRecord(input, blockers)
+  if (blockers.length > 0) return blockedRecord(canonicalInput, blockers)
 
   const currentWeight = capacitySummary.currentPosition.weight
   const holding = currentWeight > 0
-  const positionSizing = positionSizingFor(input.decisionPolicy, capacitySummary)
+  const positionSizing = positionSizingFor(canonicalInput.decisionPolicy, capacitySummary)
 
-  if (input.underwriting.longTermGate === 'FAIL') {
+  if (canonicalInput.underwriting.longTermGate === 'FAIL') {
     return prohibitedForHolding(
-      input, capacitySummary, positionSizing, ['LONG_TERM_GATE_FAILED'],
+      canonicalInput, capacitySummary, positionSizing, ['LONG_TERM_GATE_FAILED'],
     )
   }
 
-  const triggeredRules = input.underwriting.invalidationRules.filter(
+  const triggeredRules = canonicalInput.underwriting.invalidationRules.filter(
     rule => rule.state === 'TRIGGERED',
   )
   if (triggeredRules.length > 0) {
     const exitReview = triggeredRules.some(rule => rule.severity === 'EXIT_REVIEW')
     return prohibitedForHolding(
-      input,
+      canonicalInput,
       capacitySummary,
       positionSizing,
       ['UNDERWRITING_INVALIDATED'],
@@ -725,16 +556,16 @@ export function evaluateDecision(input) {
     )
   }
 
-  const { value: price } = input.evaluatedPrice
-  const { lower, upper } = input.underwriting.entryRange
+  const { value: price } = canonicalInput.evaluatedPrice
+  const { lower, upper } = canonicalInput.underwriting.entryRange
   if (price < lower || price > upper) {
     return prohibitedForHolding(
-      input, capacitySummary, positionSizing, ['PRICE_OUTSIDE_ENTRY_RANGE'],
+      canonicalInput, capacitySummary, positionSizing, ['PRICE_OUTSIDE_ENTRY_RANGE'],
     )
   }
 
   if (currentWeight > capacitySummary.effectiveLimit) {
-    return validRecord(input, capacitySummary, positionSizing, {
+    return validRecord(canonicalInput, capacitySummary, positionSizing, {
       entryStatus: 'PROHIBITED',
       buyAction: 'NO_ACTION',
       holdingRisk: 'REDUCE_REVIEW',
@@ -742,37 +573,37 @@ export function evaluateDecision(input) {
     })
   }
   if (capacitySummary.capacityToLimit === 0 || positionSizing.additionalCapacity === 0) {
-    return validRecord(input, capacitySummary, positionSizing, {
+    return validRecord(canonicalInput, capacitySummary, positionSizing, {
       entryStatus: 'PROHIBITED',
       buyAction: 'NO_ACTION',
       reasonCodes: ['NO_EFFECTIVE_CAPACITY'],
     })
   }
 
-  if (input.timingAssessment.status === 'FAIL') {
+  if (canonicalInput.timingAssessment.status === 'FAIL') {
     return prohibitedForHolding(
-      input, capacitySummary, positionSizing, ['TIMING_FAILED'],
+      canonicalInput, capacitySummary, positionSizing, ['TIMING_FAILED'],
     )
   }
-  if (input.timingAssessment.status === 'EVENT_RISK') {
-    if (holding || !input.decisionPolicy.permitPilotOnEventRisk) {
+  if (canonicalInput.timingAssessment.status === 'EVENT_RISK') {
+    if (holding || !canonicalInput.decisionPolicy.permitPilotOnEventRisk) {
       return prohibitedForHolding(
-        input, capacitySummary, positionSizing, ['EVENT_RISK'],
+        canonicalInput, capacitySummary, positionSizing, ['EVENT_RISK'],
       )
     }
     const pilotSizing = positionSizingFor(
-      input.decisionPolicy,
+      canonicalInput.decisionPolicy,
       capacitySummary,
-      input.decisionPolicy.pilotPositionLimit,
+      canonicalInput.decisionPolicy.pilotPositionLimit,
     )
-    return validRecord(input, capacitySummary, pilotSizing, {
+    return validRecord(canonicalInput, capacitySummary, pilotSizing, {
       entryStatus: 'PERMITTED',
       buyAction: 'PILOT',
       reasonCodes: ['EVENT_RISK'],
     })
   }
 
-  return validRecord(input, capacitySummary, positionSizing, {
+  return validRecord(canonicalInput, capacitySummary, positionSizing, {
     entryStatus: 'PERMITTED',
     buyAction: holding ? 'ADD' : 'OPEN',
     reasonCodes: ['ALL_GATES_PASSED'],

@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "node --test",
     "decision": "node scripts/evaluate-decision.js",
-    "capacity": "node scripts/derive-portfolio-capacity.js"
+    "capacity": "node scripts/derive-portfolio-capacity.js",
+    "underwriting": "node scripts/derive-structured-underwriting.js"
   },
   "dependencies": {
     "react": "^18.3.1",
