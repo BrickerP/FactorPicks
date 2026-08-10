@@ -52,14 +52,20 @@ GitHub Actions (daily 02:10 UTC, or manual dispatch)
 
 ## Headless decision workbench
 
-The private workbench is the one end-to-end entry point for a five-minute
-decision. It accepts a raw case with the canonical public research section
-`research: { universe, qualityManifest, policy }`, resolved source snapshots,
-Evidence/underwriting drafts, timing policy, private capacity facts, and decision
-policy, then returns exactly one sanitized `DecisionRecordV2`:
+The private workbench is the one end-to-end entry point for a symbol decision.
+The CLI reads the private case locally and obtains the public research inputs
+itself: exactly one `GET` each for `stat.json` and `data-quality.json`. The
+default public base is `https://brickerp.github.io/FactorPicks/`; `--market-url`
+selects another trusted base, such as a local read-only test server. The private
+case is never placed in a request body, header, URL, log, or public artifact.
+`stat.json` is retained as the exact UTF-8 response text, never parsed and
+re-serialized before evaluation. The quality manifest's `statArtifact`
+`sha256`, byte count, and symbol count bind that exact text to the manifest;
+any artifact/manifest mismatch fails closed.
 
 ```text
-raw case
+public stat + quality manifest + private case
+  → evaluateSymbolCase
   → evaluateResearch
   → deriveEvidenceBundle
   → deriveStructuredUnderwriting
@@ -68,26 +74,39 @@ raw case
   → evaluateDecision
 ```
 
-No caller may submit a derived Evidence bundle, valuation/entry range, timing
-status or price, capacity snapshot, position sizing, or action. Content-addressed
-projectors re-resolve every artifact and reject tampering, duplicate references,
-stale inputs, conflicting quotes, and wrong-symbol/as-of data. Timing can delay
-or cap an action but cannot promote a failed long-term gate. The final action is
-only `OPEN`, `ADD`, `PILOT`, `WATCH`, or `NO_ACTION`; this repository never places
-orders or connects to a broker.
+The private case contains only `schemaVersion`, `researchPolicy`,
+`sourceSnapshots`, `evidence`, `underwriting`, `timing`, `portfolio`, and
+`decisionPolicy`. It does not contain the symbol, evaluation time, public market
+universe, quality manifest, or a private current-price source. After validating
+the raw artifact binding, the adapter reserves `key=price`, `claimKey=PRICE`, and
+`factKey=CURRENT_PRICE` for the selected public row, while timing is fixed to
+`currentPriceFactKey=CURRENT_PRICE`. Analyst targets, historical prices, and
+other price-like facts may remain ordinary evidence under different names, but
+they cannot become `evaluatedPrice`. The adapter does not infer missing quotes,
+valuation, timing state, capacity, policy, or action from the public ranking.
+Content-addressed projectors reject tampering,
+duplicates, stale/conflicting observations, and wrong-symbol/as-of data. The
+final action is only `OPEN`, `ADD`, `PILOT`, `WATCH`, or `NO_ACTION`; this
+repository has no order, broker, Robinhood, or workbench UI integration.
 
 ```bash
-npm run workbench -- /secure/path/case.json
-npm run workbench -- - < /secure/path/case.json
+npm run workbench -- --symbol AAPL --case /secure/path/private-case.json
+npm run workbench -- --symbol AAPL --case - < /secure/path/private-case.json
+
+# Optional public base and deterministic evaluation time.
+npm run workbench -- --symbol AAPL --case /secure/path/private-case.json \
+  --market-url https://brickerp.github.io/FactorPicks/ \
+  --evaluated-at 2026-08-10T08:00:00.000Z
 
 # Optional append to an external private ledger (never inside this repository).
-npm run workbench -- /secure/path/case.json \
+npm run workbench -- --symbol AAPL --case /secure/path/private-case.json \
   --ledger /secure/private-ledger/decisions.jsonl
 ```
 
 Semantic data problems always produce `EVALUATION_BLOCKED` + `NO_ACTION` with
-bounded blocker codes. Only malformed JSON, invalid CLI arguments, or file I/O
-errors exit non-zero. Raw NLV, quantity, mark price, account identifiers,
+bounded blocker codes and exit zero. Invalid arguments, private-case JSON or
+top-level shape, public HTTP/JSON, and file I/O errors exit one with generalized
+stderr. Raw NLV, quantity, mark price, account identifiers,
 credentials, source payloads, free-form invalidation conditions/responses, and
 private claims are never copied to the output or ledger. The public invalidation
 projection contains only rule identity, evidence references, bounded severity,

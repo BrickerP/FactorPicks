@@ -1,16 +1,37 @@
 # Headless Decision Workbench
 
-This document is the current non-UI contract for FactorPicks. The repository has
-one local entry point, `npm run workbench -- [input.json|-]`; the workbench owns
-the complete raw-case-to-`DecisionRecordV2` path and may optionally append the
-sanitized record to an external private ledger. Identity verification establishes
-byte integrity and provenance binding, not external-source authenticity. This
-path has no network, broker, order, or public UI capability.
+This document is the current non-UI contract for FactorPicks. The sole local
+entry point is:
+
+```bash
+npm run workbench -- --symbol AAPL --case private-case.json|- \
+  [--market-url https://brickerp.github.io/FactorPicks/] \
+  [--evaluated-at 2026-08-10T08:00:00.000Z] \
+  [--ledger /external/private/decisions.jsonl]
+```
+
+The CLI reads the private case only from the named local file or stdin. It then
+makes exactly two public, bodyless requests: `GET <base>/stat.json` and
+`GET <base>/data-quality.json`. The default base is
+`https://brickerp.github.io/FactorPicks/`. No private case value is sent in a
+request, and the path has no broker, Robinhood, order, or public UI capability.
+It may append the sanitized `DecisionRecordV2` to an external private ledger.
+Identity verification establishes byte integrity and provenance binding, not
+external-source authenticity.
+
+The CLI retains `stat.json` as the exact UTF-8 response text. It may parse that
+text only to validate its top-level JSON shape; it must not stringify the parsed
+value or otherwise change bytes before evaluation. `data-quality.json` is JSON,
+and its required `statArtifact` contract binds the raw text by exact SHA-256,
+UTF-8 byte count, and symbol count. The manifest's `succeeded` count, bound
+symbol count, and parsed top-level symbol count must agree. A mismatch is a
+semantic blocker, never a fallback to an unbound market object.
 
 The stage order is fixed:
 
 ```text
-raw case
+public stat + quality manifest + private case
+  → evaluateSymbolCase
   → evaluateResearch
   → deriveEvidenceBundle
   → deriveStructuredUnderwriting
@@ -19,15 +40,30 @@ raw case
   → evaluateDecision
 ```
 
-Callers submit only the canonical raw sections (`research: { universe,
-qualityManifest, policy }`, resolved `sourceSnapshots`, `evidence`, `underwriting`,
-`timing: { policy }`, `portfolio`, and `decisionPolicy`). Derived artifacts,
-evaluated price, timing status, capacity, sizing, and action are rebuilt
-internally. Top-level research aliases and nested `research.policy.research`
-are not accepted. Injected derived fields or an invalid top-level schema are input
-errors; semantic missing/stale/conflicting inputs return `EVALUATION_BLOCKED` +
-`NO_ACTION` with bounded codes. Malformed JSON, CLI arguments, or I/O remain
-process errors.
+The private case accepts exactly `schemaVersion`, `researchPolicy`,
+`sourceSnapshots`, `evidence`, `underwriting`, `timing`, `portfolio`, and
+`decisionPolicy`. Symbol and evaluation time are CLI values. The public universe
+and quality manifest come only from the two public responses. A private case
+must not reintroduce `research`, occupy the reserved current-price Evidence
+namespace (`key=price`, `claimKey=PRICE`, `factKey=CURRENT_PRICE`), submit a
+different timing `currentPriceFactKey`, or provide derived Evidence,
+valuation/entry output, timing status, capacity snapshot, sizing, or action.
+
+Only after the raw artifact and manifest agree does the adapter select a public
+row. That row is the only current-price authority: its `Close`, `asOf`,
+`observedAt`, and `currency` become one secondary Yahoo market-data observation.
+The adapter injects that observation only into the reserved `price` / `PRICE` /
+`CURRENT_PRICE` Evidence namespace, and the timing policy is fixed to
+`currentPriceFactKey=CURRENT_PRICE`. Analyst targets, historical prices, and
+other price-like facts may remain ordinary Evidence under distinct keys, claims,
+and fact keys. They may support underwriting, but cannot satisfy the reserved
+current-price lookup or become `evaluatedPrice`. The adapter does not infer a
+missing or stale quote, thesis, valuation, entry range, timing state, account
+capacity, personal limits, policy, or action from ranks or neighboring symbols.
+Missing, stale, conflicting, or wrong-symbol semantic data returns
+`EVALUATION_BLOCKED` + `NO_ACTION` with exit zero. Invalid argv, private-case
+JSON/top-level shape, public HTTP/non-object JSON, URL, or file I/O exits one
+with generalized stderr.
 
 Evidence timestamps are derived from resolved source facts and inference
 parents. Freshness is rechecked at each downstream boundary with
@@ -79,11 +115,11 @@ MarketDataSnapshot
 
 ## Public research and private decision boundary
 
-Public artifacts may contain the `Research Universe`, source-normalized `MarketDataSnapshot`, `Quality Manifest`, and `FundamentalResearch` facts that can be independently inspected. They must not contain a personal thesis, valuation assumptions, entry range, invalidation state, timing judgment, account holdings, personal/industry/portfolio limits, or a `DecisionRecord`.
+Public artifacts may contain the `Research Universe`, source-normalized `MarketDataSnapshot`, `Quality Manifest`, and `FundamentalResearch` facts that can be independently inspected. They must not contain a personal thesis, valuation assumptions, entry range, invalidation state, timing judgment, account holdings, personal/industry/portfolio limits, or a `DecisionRecord`. Fetching those artifacts is read-only and never uploads the private case.
 
 Private state begins with the `Underwriting Case` and includes its evidence interpretation, valuation and entry assumptions, invalidation rules, timing assessment, portfolio capacity, decision policy, and private ledger. Evidence may point back to a public source, but the claim it supports and the investor's confidence remain private; publishing a source does not publish the thesis.
 
-Robinhood is an external, read-only adapter. It may normalize authenticated account facts such as symbol, quantity, market value, account as-of time, and net liquidation value into a private holdings input; it does not expose credentials, personal policy, industry/sector strategy, portfolio strategy, or any write capability to this repository.
+This workbench does not contact Robinhood or any account provider. If an external system supplies account facts, it must normalize them into the private `portfolio` section before invoking the CLI; no credentials or account-provider client belongs in this path.
 
 The canonical position denominator is `netLiquidationValue` (NLV), captured at the same account as-of time as the holding facts. Position weights, hard limits, `effectiveLimit`, `positionSizing.targetPosition`, and `positionSizing.additionalCapacity` are all expressed against NLV; personal, industry, and portfolio strategies remain private policy inputs and are never inferred from the public ranking.
 
@@ -174,13 +210,16 @@ reaches the record or external ledger.
 ### TimingAssessment
 
 `deriveTimingAssessment` accepts only the exact raw policy fields: current-price,
-pass/fail/event-risk keys, freshness limits, and event-risk reason code. Aliases,
-defaults, and caller-supplied `requirePassSupport` are rejected; pass support is
-always required. The policy is stored as a content-addressed `TIMING_POLICY`
-snapshot. The builder then resolves Evidence and derives the only allowed
-current quote from exactly one fresh, non-conflicting `OBSERVED` current-price
-item for the same symbol in USD. Caller-supplied status, price, price evidence
-ID, reason codes, or timing artifact fields are rejected.
+pass/fail/event-risk keys, freshness limits, and event-risk reason code. For the
+symbol-case adapter, `currentPriceFactKey` is fixed to `CURRENT_PRICE`; aliases,
+other fact keys, defaults, and caller-supplied `requirePassSupport` are rejected.
+Pass support is always required. The policy is stored as a content-addressed
+`TIMING_POLICY` snapshot. The builder then resolves Evidence and derives the only
+allowed current quote from exactly one fresh, non-conflicting `OBSERVED` item in
+the reserved `key=price`, `claimKey=PRICE`, `factKey=CURRENT_PRICE` namespace for
+the same symbol in USD. Caller-supplied status, price, price evidence ID, reason
+codes, or timing artifact fields are rejected. Other target or historical price
+Evidence is never eligible for `evaluatedPrice`.
 
 The resulting content-addressed artifact binds the symbol, Evidence snapshot and
 digest, price evidence ID, status, as-of, evidence IDs, and bounded reason codes.
@@ -343,25 +382,32 @@ The gate-to-action mapping is deterministic:
 | All gates `PASS`, target above current | `OPEN` | `ADD` | `NONE` |
 | All gates `PASS`, no additional capacity | `NO_ACTION` | `NO_ACTION` | `NONE` |
 
-## Five-minute prefetch orchestration (request-time only)
+## Symbol-case orchestration
 
-The five-minute budget applies to request-time assembly, not to a full-market fetch. Full-market research is prefetched offline well before a decision request and is accepted only when its `Quality Manifest` is valid:
+The public producer publishes a coherent `stat.json` and `data-quality.json`
+pair before a request. For one invocation, the CLI:
 
-1. An earlier offline batch freezes the `Research Universe`, fetches the full market, validates source identity/counts/freshness/critical-field coverage, and derives timing-excluded `FundamentalResearch`.
-2. At request start, read the most recent valid `FundamentalResearch` and quality snapshot by reference; do not start a full-market fetch at `T-5` or inside the request.
-3. Refresh only the requested symbol's quote and `TimingAssessment`, using one quote as-of and explicit timing evidence.
-4. When capacity is needed, refresh the external read-only Robinhood account facts and normalize only holdings/denominator references; do not fetch or infer private strategy from public research.
-5. Load the private `Underwriting Case`, compute `PortfolioCapacitySnapshot`, run `DecisionPolicy` and `PositionSizing`, create `DecisionRecordV2`, and append the sanitized derived record to `PrivateLedger`.
+1. validates argv and reads the private case locally;
+2. reads each public file once from one base URL using `GET` without a body,
+   preserving the `stat.json` response text byte-for-byte;
+3. verifies the manifest's raw-artifact hash/bytes/symbol counts, then selects
+   the canonicalized symbol row and builds one secondary public price observation;
+4. combines only the public research inputs with the explicit private sections;
+5. evaluates the fixed domain stages and emits one sanitized `DecisionRecordV2`;
+6. when requested, appends that exact stdout record once to the external ledger.
 
-If no recent valid fundamental snapshot exists, or any request-time quote, timing, account fact, or evidence is late, partial, stale, or internally inconsistent, the evaluation is `Evaluation Blocked`. The request never mixes rows from different fundamental snapshots or falls back to an unqualified ranking. Timing and quote refreshes may update the single-symbol decision inputs, but cannot mutate the published fundamental snapshot.
+The CLI does not refresh an account, place an order, call a broker, write public
+data, or mutate a UI. It never falls back to a private quote, another symbol,
+an unqualified ranking, or an inferred personal policy. A late, partial, stale,
+or inconsistent semantic input is `Evaluation Blocked`.
 
 ## Privacy and execution boundary
 
-The public pipeline may be cached, reviewed, and published without an account identity. Private inputs are kept outside public artifacts and repository history, with access limited to the investor's decision context; logs and evidence references must not contain credentials or raw account secrets.
+The public pipeline may be cached, reviewed, and published without an account identity. Private inputs are kept outside public artifacts and repository history, with access limited to the investor's decision context; request URLs, bodies, headers, stderr, logs, and evidence references must not contain credentials or raw account secrets.
 
 By default, `PrivateLedger` stores only derived weights, action/risk outcomes, policy references, and snapshot/evidence references or digests. It does not store raw NLV, quantity, market value, or account ID. The private `SnapshotStore` is encrypted, content-addressed, and immutable; its retention cannot end before any referencing decision record, and deletion requires no remaining references. If an external system ever persists the raw private input bundle, that system must encrypt it and enforce an explicit retention policy; encrypted raw-bundle persistence is not implemented in the current target.
 
-The workbench is decision support only. It may read and normalize holdings, evaluate policy, and write a private `DecisionRecordV2`; it must not submit, schedule, amend, cancel, or simulate a broker order as if it had executed. Any future execution requires a separate, explicit, human-authorized system at the `Execution Boundary`. If `--ledger` is used, the target must be an external owner-only (`0600`) regular file; symlinked targets/parents, repository paths, devices, and group/other-readable files are rejected.
+The workbench is decision support only. It may read and normalize holdings, evaluate policy, and write a private `DecisionRecordV2`; it must not submit, schedule, amend, cancel, or simulate a broker order as if it had executed. Any future execution requires a separate, explicit, human-authorized system at the `Execution Boundary`. If `--ledger` is used, the target must be an external owner-only (`0600`) regular file; symlinked targets/parents, repository paths, devices, and group/other-readable files are rejected. Before writing, the CLI revalidates every parent component, opens with `O_NOFOLLOW`, verifies the opened regular file's device/inode and mode against the final real path, rechecks the components, and writes only through that verified file descriptor.
 
 ## Migration order and deletion list
 
@@ -370,7 +416,9 @@ Migration is a clean cutover to the target contracts; no compatibility layer, al
 1. Define and test the target domain contracts and invariants for snapshots, evidence, underwriting, valuation, invalidation, timing, capacity, policy, and `DecisionRecordV2`.
 2. Replace the public producer with `MarketDataSnapshot` and `FundamentalResearch`, remove timing from the fundamental catalog, and make the quality manifest the required research gate.
 3. Introduce private structured underwriting and evidence-backed valuation/entry/invalidation, followed by the downstream `TimingAssessment`.
-4. Replace position math with the NLV-denominated `PortfolioCapacitySnapshot`; add the external read-only Robinhood holdings adapter without moving private limits or strategy into public research.
+4. Replace position math with the NLV-denominated `PortfolioCapacitySnapshot`;
+   accept only externally assembled account facts in the private case, without
+   adding an account-provider client or moving private strategy into research.
 5. Replace decision output with `DecisionRecordV2` and private-ledger persistence, then remove the old decision field names and ungrounded status paths.
 6. After the v2 cutover, rewrite or delete the old `docs/decision-core.md` v1 description so it is no longer an authoritative contract; do not leave two decision models in force.
 
