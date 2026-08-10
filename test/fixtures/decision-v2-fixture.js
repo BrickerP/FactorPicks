@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
+import { createSnapshot } from '../../src/domain/contentAddressing.js'
 import { derivePortfolioCapacitySnapshot } from '../../src/domain/portfolioCapacity.js'
+import { deriveEvidenceBundle } from '../../src/domain/evidence.js'
+import { deriveStructuredUnderwriting } from '../../src/domain/structuredUnderwriting.js'
 import { capacityInput } from './portfolio-capacity-fixture.js'
+import { evidenceInput, underwritingInput } from './underwriting-fixture.js'
 
 export const NOW = '2026-08-09T08:00:00.000Z'
 export const SNAPSHOT_AS_OF = '2026-08-09T07:55:00.000Z'
@@ -132,8 +136,18 @@ export function decisionInput(overrides = {}) {
     'quality',
     'research',
     'underwriting',
-    'decision-policy',
   ].map(label => [label, snapshot(label)]))
+  const decisionPolicyValues = {
+    targetPosition: overrides.decisionPolicy?.targetPosition ?? 0.05,
+    pilotPositionLimit: overrides.decisionPolicy?.pilotPositionLimit ?? 0.01,
+    permitPilotOnEventRisk: overrides.decisionPolicy?.permitPilotOnEventRisk ?? true,
+    maxInputAgeMs: overrides.decisionPolicy?.maxInputAgeMs ?? 3_600_000,
+    maxFutureSkewMs: overrides.decisionPolicy?.maxFutureSkewMs ?? 60_000,
+  }
+  const decisionPolicySnapshot = createSnapshot('decision-policy', {
+    role: 'DECISION_POLICY', kind: 'DECISION_POLICY', schemaVersion: 1,
+    symbol: 'AAA', currency: 'USD', asOf: NOW, policy: decisionPolicyValues,
+  })
   const weightSupplied = Object.hasOwn(
     overrides.portfolioCapacity?.currentPosition ?? {},
     'weight',
@@ -169,6 +183,39 @@ export function decisionInput(overrides = {}) {
   if (weightSupplied && !Number.isFinite(requestedWeight)) {
     derivedCapacity.portfolioCapacity.currentPosition.weight = requestedWeight
   }
+  const requestedRule = overrides.underwriting?.invalidationRules?.[0]
+  const requestedPredicate = requestedRule?.predicate
+  const validMetricRule = requestedRule?.state === 'TRIGGERED' &&
+    requestedPredicate?.kind === 'METRIC' && typeof requestedPredicate.metric === 'string' &&
+    ['GT', 'GTE', 'LT', 'LTE', 'EQ', 'NEQ'].includes(requestedPredicate.operator) &&
+    Number.isFinite(requestedPredicate.threshold) && typeof requestedPredicate.lookback === 'string' &&
+    Number.isInteger(requestedPredicate.consecutive) && requestedPredicate.consecutive > 0 &&
+    typeof requestedPredicate.source === 'string' && requestedPredicate.source.length > 0 &&
+    requestedRule.manualStatus === 'NOT_REQUIRED'
+  const validManualRule = requestedPredicate?.kind === 'MANUAL' &&
+    requestedRule?.state === ({ PENDING: 'UNKNOWN', CONFIRMED: 'TRIGGERED', REJECTED: 'UNTRIGGERED' })[requestedRule?.manualStatus] &&
+    ['metric', 'operator', 'threshold', 'lookback', 'consecutive', 'source']
+      .every(key => requestedPredicate[key] === null)
+  const deriveRequestedRule = validMetricRule || validManualRule
+  const evidenceSeed = evidenceInput()
+  if (overrides.underwriting?.longTermGate === 'FAIL') {
+    evidenceSeed.drafts[0].stance = 'CHALLENGES'
+  }
+  const evidenceDerived = deriveEvidenceBundle(evidenceSeed)
+  const underwritingSeed = underwritingInput({
+    evidence: evidenceDerived.evidence,
+    resolvedSnapshots: evidenceSeed.resolvedSnapshots.concat(evidenceDerived.resolvedSnapshots),
+    invalidationDrafts: deriveRequestedRule ? [{
+      key: 'margin-rule', condition: requestedRule.condition ?? 'Operating margin rule',
+      severity: requestedRule.severity ?? 'REVIEW', response: requestedRule.response ?? 'Review',
+      ...(validManualRule ? { manualStatus: requestedRule.manualStatus,
+        predicate: { kind: 'MANUAL' } } : { predicate: { kind: 'METRIC',
+        factKey: 'OPERATING_MARGIN', operator: requestedRule.state === 'TRIGGERED' ? 'GT' : 'LT',
+        threshold: 0.1, lookback: 'P1Q', consecutive: 1,
+        source: 'SEC_FILING', unit: 'ratio' } }),
+    }] : undefined,
+  })
+  const underwritingDerived = deriveStructuredUnderwriting(underwritingSeed)
   const input = {
     research: {
       symbol: 'AAA',
@@ -184,36 +231,26 @@ export function decisionInput(overrides = {}) {
       asOf: SNAPSHOT_AS_OF,
       source: opaqueRef('source', 'consolidated-quote'),
     },
-    evidence: {
-      digest: EVIDENCE_DIGEST,
-      items: structuredClone(DEFAULT_EVIDENCE),
-    },
-    underwriting: {
-      snapshotRef: snapshotEntries.underwriting.ref,
-      longTermGate: 'PASS',
-      evidenceIds: [opaqueRef('evidence', 'thesis')],
-      valuationRange: valuationRange(),
-      entryRange: entryRange(),
-      invalidationRules: [invalidationRule()],
-    },
+    evidence: evidenceDerived.evidence,
+    underwriting: underwritingDerived.underwriting,
     timingAssessment: {
       status: 'PASS',
       asOf: SNAPSHOT_AS_OF,
-      evidenceIds: [opaqueRef('evidence', 'timing')],
+      evidenceIds: [evidenceDerived.evidence.items[0].id],
       reasonCodes: [],
     },
     portfolioCapacity: derivedCapacity.portfolioCapacity,
     decisionPolicy: {
-      targetPosition: 0.05,
-      pilotPositionLimit: 0.01,
-      permitPilotOnEventRisk: true,
-      maxInputAgeMs: 3_600_000,
-      maxFutureSkewMs: 60_000,
-      ref: snapshotEntries['decision-policy'].ref,
+      ...decisionPolicyValues,
+      ref: decisionPolicySnapshot.ref,
     },
     resolvedSnapshots: Object.values(snapshotEntries)
       .map(entry => entry.resolved)
-      .concat(derivedCapacity.resolvedSnapshots),
+      .concat(decisionPolicySnapshot.resolved)
+      .concat(derivedCapacity.resolvedSnapshots)
+      .concat(evidenceSeed.resolvedSnapshots)
+      .concat(evidenceDerived.resolvedSnapshots)
+      .concat(underwritingDerived.resolvedSnapshots),
     now: NOW,
   }
 
@@ -221,7 +258,11 @@ export function decisionInput(overrides = {}) {
     ...input,
     ...overrides,
     research: { ...input.research, ...overrides.research },
-    underwriting: { ...input.underwriting, ...overrides.underwriting },
+    underwriting: { ...input.underwriting, ...overrides.underwriting,
+      ...(overrides.underwriting?.longTermGate === 'FAIL'
+        ? { longTermGate: input.underwriting.longTermGate }
+        : {}),
+      ...(deriveRequestedRule ? { invalidationRules: input.underwriting.invalidationRules } : {}) },
     timingAssessment: { ...input.timingAssessment, ...overrides.timingAssessment },
     portfolioCapacity: input.portfolioCapacity,
     decisionPolicy: { ...input.decisionPolicy, ...overrides.decisionPolicy },

@@ -119,6 +119,25 @@ payloads that can be merged directly into a `DecisionRecordV2` bundle.
 Incomplete, margin, multi-account, non-USD, short, option, crypto, mixed-as-of,
 or unclassified inputs fail closed.
 
+## Structured underwriting CLI
+
+`npm run underwriting -- [input.json|-]` derives one content-addressed,
+Evidence-backed underwriting artifact from a local JSON document. With `-` (or
+no path), it reads stdin. It performs no fetch, ledger write, broker access, or
+order operation.
+
+The builder verifies canonical identity and internal integrity of resolved
+source snapshots. This proves that the artifact refers to unchanged bytes; it
+does not prove that an external publisher's facts are authentic or true.
+Claims, source payloads, account facts, and private policy do not enter public
+Pages artifacts or the allow-listed `DecisionRecordV2` output.
+
+Evidence freshness is re-evaluated at underwriting time and again at decision
+time, so an old but internally valid bundle cannot be replayed into a new
+`OPEN` or `ADD`. Decision sizing and timing limits are projected from the
+resolved, content-addressed decision-policy payload; mismatched outer policy
+fields fail closed.
+
 ## Local development
 
 ```bash
