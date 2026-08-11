@@ -84,13 +84,12 @@ function baseArgs(casePath, marketUrl) {
   return [
     '--symbol', 'AAA',
     '--case', casePath,
-    '--robinhood', '-',
     '--market-url', marketUrl,
     '--evaluated-at', NOW,
   ]
 }
 
-test('reports collected-bundle transport failures generically while the private case is a file', async () => {
+test('reports RobinhoodReadV2 stdin transport failures generically while the private case is a file', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-file-case-'))
   const { input, casePath } = writePrivateCase(directory)
   const market = await startMarketServer(input)
@@ -100,14 +99,14 @@ test('reports collected-bundle transport failures generically while the private 
 
     assert.equal(result.status, 1)
     assert.doesNotMatch(result.stderr, /Usage:/)
-    assert.equal(result.stderr, 'Unable to load collected portfolio input\n')
+    assert.equal(result.stderr, 'Unable to load Robinhood read input\n')
     assert.doesNotMatch(result.stderr, /robinhood-provider-canary/)
     assert.equal(result.stdout, '')
     assert.equal(market.requests.length, 0)
 
     const missingCollection = await run(baseArgs(casePath, market.baseUrl), '')
     assert.equal(missingCollection.status, 1)
-    assert.equal(missingCollection.stderr, 'Unable to load collected portfolio input\n')
+    assert.equal(missingCollection.stderr, 'Unable to load Robinhood read input\n')
     assert.equal(missingCollection.stdout, '')
     assert.equal(market.requests.length, 0)
   } finally {
@@ -116,14 +115,14 @@ test('reports collected-bundle transport failures generically while the private 
   }
 })
 
-test('rejects --case - before consuming Robinhood stdin or fetching public market data', async () => {
+test('rejects --case - before consuming implicit RobinhoodReadV2 stdin or fetching public market data', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-case-stdin-'))
   const { input } = writePrivateCase(directory)
   const market = await startMarketServer(input)
   try {
     const providerCanary = '{"providerSecret":"case-stdin-canary"}'
     const result = await run([
-      '--symbol', 'AAA', '--case', '-', '--robinhood', '-',
+      '--symbol', 'AAA', '--case', '-',
       '--market-url', market.baseUrl, '--evaluated-at', NOW,
     ], providerCanary)
 
@@ -137,24 +136,18 @@ test('rejects --case - before consuming Robinhood stdin or fetching public marke
   }
 })
 
-test('requires --robinhood - and rejects provider file paths before input or network', async () => {
+test('rejects the retired --robinhood flag before implicit stdin or network access', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-arg-'))
   const { input, casePath } = writePrivateCase(directory)
   const market = await startMarketServer(input)
   try {
     const scenarios = [
-      ['missing provider flag', [
-        '--symbol', 'AAA', '--case', casePath,
-        '--market-url', market.baseUrl, '--evaluated-at', NOW,
-      ]],
+      ['stdin sentinel', [...baseArgs(casePath, market.baseUrl), '--robinhood', '-']],
       ['provider file path', [
-        ...baseArgs(casePath, market.baseUrl).slice(0, 4),
+        ...baseArgs(casePath, market.baseUrl),
         '--robinhood', join(directory, 'robinhood.json'),
-        ...baseArgs(casePath, market.baseUrl).slice(6),
       ]],
-      ['provider flag without value', [
-        '--symbol', 'AAA', '--case', casePath, '--robinhood',
-      ]],
+      ['provider flag without value', [...baseArgs(casePath, market.baseUrl), '--robinhood']],
     ]
     for (const [name, args] of scenarios) {
       const result = await run(args, '{"providerSecret":"arg-canary"}')

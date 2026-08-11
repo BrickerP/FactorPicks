@@ -1,6 +1,6 @@
-import { AS_OF } from './workbench-fixture.js'
-
 export const ACCOUNT_NUMBER = 'RH-PRIVATE-4321'
+export const ROBINHOOD_CAPTURED_AT = '2026-08-10T20:00:00.000Z'
+export const REGULAR_QUOTE_AS_OF = '2026-08-10T19:59:00.000Z'
 
 function position(symbol, quantity = '100') {
   return {
@@ -17,7 +17,7 @@ function position(symbol, quantity = '100') {
   }
 }
 
-function result(symbol, price = '50', asOf = AS_OF) {
+function quoteResult(symbol, price = '95', asOf = REGULAR_QUOTE_AS_OF) {
   return {
     quote: {
       symbol,
@@ -31,11 +31,40 @@ function result(symbol, price = '50', asOf = AS_OF) {
   }
 }
 
+function earningsResult({
+  symbol = 'AAA',
+  year = 2026,
+  quarter = 2,
+  estimate = 1.1,
+  actual = 1.2,
+  date = '2026-07-30',
+  timing = 'pm',
+  verified = true,
+} = {}) {
+  return {
+    symbol,
+    year,
+    quarter,
+    eps: { estimate, actual },
+    report: date === null ? null : { date, timing, verified },
+  }
+}
+
+function earningsData({ results, notFound = [] } = {}) {
+  return {
+    not_found: notFound,
+    results: results ?? [earningsResult()],
+  }
+}
+
 export function robinhoodRead({
+  targetSymbol = 'AAA',
   positions = [],
   positionPages,
   quoteBatches,
+  earnings = earningsData({ results: [earningsResult({ symbol: targetSymbol })] }),
   totalValue = '100000.00',
+  capturedAt = ROBINHOOD_CAPTURED_AT,
 } = {}) {
   const pages = positionPages ?? [{
     accountNumber: ACCOUNT_NUMBER,
@@ -43,14 +72,18 @@ export function robinhoodRead({
     next: null,
     positions,
   }]
-  const tickers = pages.flatMap(page => page.positions.map(item => item.symbol))
-  const batches = quoteBatches ?? (tickers.length === 0 ? [] : [{
+  const tickers = [...new Set([
+    ...pages.flatMap(page => page.positions.map(item => item.symbol)),
+    targetSymbol,
+  ])].sort()
+  const batches = quoteBatches ?? [{
     requestedSymbols: tickers,
-    results: tickers.map(ticker => result(ticker)),
-  }])
+    results: tickers.map(ticker => quoteResult(ticker)),
+  }]
   return {
-    schemaVersion: 1,
-    capturedAt: AS_OF,
+    schemaVersion: 2,
+    capturedAt,
+    targetSymbol,
     selectedAccountNumber: ACCOUNT_NUMBER,
     accounts: [{
       account_number: ACCOUNT_NUMBER,
@@ -65,7 +98,7 @@ export function robinhoodRead({
       data: {
         currency: 'USD',
         total_value: totalValue,
-        equity_value: tickers.length === 0 ? '0' : '5000',
+        equity_value: tickers.length === 1 && positions.length === 0 ? '0' : '5000',
         options_value: '0',
         crypto_value: '0',
         fixed_income_value: '0',
@@ -76,11 +109,11 @@ export function robinhoodRead({
     },
     positionPages: pages,
     quoteBatches: batches,
+    earnings: { symbol: targetSymbol, data: earnings },
   }
 }
 
 export function addRead() {
-  const later = position('AAA', '10')
   return robinhoodRead({
     positionPages: [
       {
@@ -93,10 +126,15 @@ export function addRead() {
         accountNumber: ACCOUNT_NUMBER,
         cursor: 'next-page',
         next: null,
-        positions: [later],
+        positions: [position('AAA', '10')],
       },
     ],
   })
 }
 
-export { position as robinhoodPosition, result as robinhoodQuoteResult }
+export {
+  earningsData as robinhoodEarningsData,
+  earningsResult as robinhoodEarningsResult,
+  position as robinhoodPosition,
+  quoteResult as robinhoodQuoteResult,
+}

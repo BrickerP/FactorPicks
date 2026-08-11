@@ -1,7 +1,7 @@
 import { createSnapshot } from '../../src/domain/contentAddressing.js'
 
-const NOW = '2026-08-10T08:00:00.000Z'
-const AS_OF = NOW
+const NOW = '2026-08-10T20:00:00.000Z'
+const AS_OF = '2026-08-10T19:59:00.000Z'
 const SOURCE_REF = `source:${'1'.repeat(64)}`
 const POLICY_REF = `source:${'2'.repeat(64)}`
 const LIQUIDITY_REF = `source:${'3'.repeat(64)}`
@@ -40,40 +40,81 @@ function sourceSnapshot() {
     role: 'SOURCE', kind: 'SEC_FILING', schemaVersion: 1, symbol: 'AAA',
     currency: 'USD', asOf: AS_OF, observedAt: AS_OF,
     facts: [
-      { factKey: 'CURRENT_PRICE', value: 95, asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD' },
       { factKey: 'REVENUE', value: 100, asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD' },
       { factKey: 'OPERATING_MARGIN', value: 0.2, asOf: AS_OF, scope: { symbol: 'AAA' }, unit: 'ratio' },
-      { factKey: 'TIMING_PASS', value: true, asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD' },
-      { factKey: 'EVENT_RISK', value: true, asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD' },
-      { factKey: 'TIMING_FAIL', value: false, asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD' },
+    ],
+  })
+}
+
+function marketSourceSnapshot() {
+  return createSnapshot('source', {
+    role: 'SOURCE', kind: 'ROBINHOOD_EQUITY_QUOTE', schemaVersion: 1, symbol: 'AAA',
+    currency: 'USD', asOf: AS_OF, observedAt: NOW,
+    facts: [
+      { factKey: 'CURRENT_PRICE', value: 95, asOf: AS_OF,
+        observedAt: NOW, scope: { symbol: 'AAA' }, currency: 'USD' },
+      { factKey: 'MARKET_SESSION', value: 'REGULAR', asOf: AS_OF,
+        observedAt: NOW, scope: { symbol: 'AAA' } },
+    ],
+  })
+}
+
+function earningsSourceSnapshot({
+  nextEarnings = null,
+  risk = false,
+} = {}) {
+  const value = nextEarnings ?? (risk
+    ? { date: '2026-08-11', timing: 'pm', verified: false }
+    : null)
+  return createSnapshot('source', {
+    role: 'SOURCE', kind: 'ROBINHOOD_EARNINGS_CALENDAR', schemaVersion: 1, symbol: 'AAA',
+    currency: 'USD', asOf: NOW, observedAt: NOW,
+    facts: [
+      { factKey: 'EARNINGS_SCHEDULE_KNOWN', value: true, asOf: NOW,
+        observedAt: NOW, scope: { symbol: 'AAA' } },
+      ...(value
+        ? [{ factKey: 'NEXT_EARNINGS_AT', value, asOf: NOW,
+            observedAt: NOW, scope: { symbol: 'AAA' } }]
+        : []),
     ],
   })
 }
 
 export function rawCase(overrides = {}) {
   const source = sourceSnapshot()
+  const marketSource = marketSourceSnapshot()
+  const earningsSource = earningsSourceSnapshot()
   const result = {
     schemaVersion: 1,
     symbol: 'AAA',
     evaluatedAt: NOW,
     research: research(),
-    sourceSnapshots: [source.resolved],
+    sourceSnapshots: [source.resolved, marketSource.resolved, earningsSource.resolved],
     evidence: {
       freshnessPolicy: { maxAgeMs: 3_600_000, maxFutureSkewMs: 60_000 },
-      sourcePolicy: { schemaVersion: 1, kinds: { SEC_FILING: 'PRIMARY' } },
+      sourcePolicy: { schemaVersion: 1, kinds: {
+        SEC_FILING: 'PRIMARY',
+        ROBINHOOD_EQUITY_QUOTE: 'PRIMARY',
+        ROBINHOOD_EARNINGS_CALENDAR: 'PRIMARY',
+      } },
       gatePolicy: { schemaVersion: 1, gates: [{ gateId: 'thesis', claimKey: 'THESIS', materiality: 'MATERIAL', required: true }] },
       drafts: [
-        { key: 'price', claimKey: 'PRICE', factKey: 'CURRENT_PRICE', value: 95, sourceRef: source.ref.id,
+        { key: 'price', claimKey: 'MARKET_PRICE', factKey: 'CURRENT_PRICE', value: 95,
+          sourceRef: marketSource.ref.id,
           asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD', stance: 'SUPPORTS', confidence: 1 },
+        { key: 'market-session', claimKey: 'MARKET_SESSION', factKey: 'MARKET_SESSION',
+          value: 'REGULAR', sourceRef: marketSource.ref.id, asOf: AS_OF,
+          scope: { symbol: 'AAA' }, stance: 'SUPPORTS', confidence: 1 },
+        { key: 'earnings-schedule-known', claimKey: 'EARNINGS_SCHEDULE',
+          factKey: 'EARNINGS_SCHEDULE_KNOWN',
+          value: true, sourceRef: earningsSource.ref.id, asOf: NOW,
+          scope: { symbol: 'AAA' }, stance: 'SUPPORTS', confidence: 1 },
         { key: 'thesis', claimKey: 'THESIS', factKey: 'REVENUE', value: 100, sourceRef: source.ref.id,
           asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD', stance: 'SUPPORTS', confidence: 1 },
         { key: 'valuation', claimKey: 'VALUATION', factKey: 'DCF_VALUE', value: 120, inputKeys: ['thesis'],
           asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD', stance: 'SUPPORTS', confidence: 1 },
         { key: 'margin', claimKey: 'MARGIN', factKey: 'OPERATING_MARGIN', value: 0.2, sourceRef: source.ref.id,
           asOf: AS_OF, scope: { symbol: 'AAA' }, unit: 'ratio', stance: 'SUPPORTS', confidence: 1 },
-        { key: 'pass', claimKey: 'TIMING_PASS', factKey: 'TIMING_PASS', value: true,
-          sourceRef: source.ref.id, asOf: AS_OF, scope: { symbol: 'AAA' }, currency: 'USD',
-          stance: 'SUPPORTS', confidence: 1 },
       ],
     },
     underwriting: {
@@ -84,9 +125,8 @@ export function rawCase(overrides = {}) {
         predicate: { kind: 'METRIC', factKey: 'OPERATING_MARGIN', operator: 'LT', threshold: 0.1,
           lookback: 'P1Q', consecutive: 1, source: 'SEC_FILING', unit: 'ratio' } }],
     },
-    timing: { policy: { schemaVersion: 1, currentPriceFactKey: 'CURRENT_PRICE', passClaimKey: 'TIMING_PASS',
-      failClaimKey: 'TIMING_FAIL', eventRiskClaimKey: 'EVENT_RISK', maxAgeMs: 900_000,
-      maxFutureSkewMs: 60_000, eventRiskReasonCode: 'EARNINGS_SOON' } },
+    timing: { policy: { schemaVersion: 2, maxQuoteAgeMs: 900_000,
+      maxFutureSkewMs: 60_000, earningsRiskWindowDays: 7 } },
     portfolio: {
       portfolio: { asOf: AS_OF, sourceRef: SOURCE_REF, completeness: 'COMPLETE', accountCount: 1,
         accountType: 'CASH', currency: 'USD', netLiquidationValue: 100_000, hasOptions: false,
@@ -103,4 +143,4 @@ export function rawCase(overrides = {}) {
   return { ...result, ...overrides }
 }
 
-export { NOW, AS_OF, sourceSnapshot }
+export { NOW, AS_OF, sourceSnapshot, marketSourceSnapshot, earningsSourceSnapshot }

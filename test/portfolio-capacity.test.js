@@ -5,7 +5,11 @@ import { fileURLToPath } from 'node:url'
 
 import { derivePortfolioCapacitySnapshot } from '../src/domain/portfolioCapacity.js'
 import { evaluateDecision } from '../src/domain/evaluateDecision.js'
-import { decisionInput } from './fixtures/decision-v2-fixture.js'
+import {
+  decisionInput,
+  NOW as DECISION_NOW,
+  SNAPSHOT_AS_OF as DECISION_AS_OF,
+} from './fixtures/decision-v2-fixture.js'
 import {
   CAPACITY_AS_OF,
   capacityInput,
@@ -206,7 +210,13 @@ test('does not mutate input or expose raw account facts in derived output', () =
 test('builder output merges directly into the decision bundle and tampering blocks', () => {
   function bundleFromDerived() {
     const input = decisionInput()
-    const derived = derivePortfolioCapacitySnapshot(capacityInput())
+    const capacity = capacityInput()
+    capacity.evaluatedAt = DECISION_NOW
+    capacity.portfolio.asOf = DECISION_AS_OF
+    capacity.portfolio.positions = capacity.portfolio.positions
+      .map(position => ({ ...position, asOf: DECISION_AS_OF }))
+    capacity.liquidity.asOf = DECISION_AS_OF
+    const derived = derivePortfolioCapacitySnapshot(capacity)
     const oldIds = new Set([
       input.portfolioCapacity.portfolioSnapshotRef.id,
       input.portfolioCapacity.capacityPolicyRef.id,
@@ -334,6 +344,28 @@ test('capacity derivation enforces canonical tickers and coherent policy and fre
       () => derivePortfolioCapacitySnapshot(capacityInput(overrides)),
       error => error.code === 'INVALID_PORTFOLIO_CAPACITY_INPUT',
       name,
+    )
+  }
+})
+
+test('validates each held mark timestamp against evaluatedAt instead of portfolio asOf', () => {
+  const fresh = capacityInput()
+  fresh.portfolio.positions[0].asOf = '2026-08-09T07:54:00.000Z'
+  assert.equal(
+    derivePortfolioCapacitySnapshot(fresh).portfolioCapacity.currentPosition.weight,
+    0.02,
+  )
+
+  for (const asOf of [
+    '2026-08-09T07:49:59.999Z',
+    '2026-08-09T08:01:00.000000001Z',
+  ]) {
+    const input = capacityInput()
+    input.portfolio.positions[0].asOf = asOf
+    assert.throws(
+      () => derivePortfolioCapacitySnapshot(input),
+      error => error.code === 'INVALID_PORTFOLIO_CAPACITY_INPUT',
+      asOf,
     )
   }
 })

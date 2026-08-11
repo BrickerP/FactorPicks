@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto'
 
-import { createSnapshot } from './contentAddressing.js'
 import { evaluateWorkbench } from './workbench.js'
-import { deriveRobinhoodPortfolioInput } from './robinhoodPortfolio.js'
+import { deriveRobinhoodInputs } from './robinhoodRead.js'
 
 const INPUT_KEYS = [
   'symbol', 'evaluatedAt', 'statArtifact', 'qualityManifest', 'robinhoodRead', 'privateCase',
@@ -17,6 +16,34 @@ const PRIVATE_CASE_KEYS = [
   'capacityPolicy',
   'decisionPolicy',
 ]
+const TIMING_POLICY_KEYS = [
+  'schemaVersion',
+  'maxQuoteAgeMs',
+  'maxFutureSkewMs',
+  'earningsRiskWindowDays',
+]
+const MACHINE_SOURCE_KINDS = new Set([
+  'ROBINHOOD_EQUITY_QUOTE',
+  'ROBINHOOD_EARNINGS_CALENDAR',
+])
+const MACHINE_DRAFT_KEYS = new Set([
+  'price',
+  'market-session',
+  'earnings-schedule-known',
+  'next-earnings-at',
+])
+const MACHINE_CLAIMS = new Set([
+  'MARKET_PRICE',
+  'MARKET_SESSION',
+  'EARNINGS_SCHEDULE',
+  'PRICE',
+])
+const MACHINE_FACTS = new Set([
+  'CURRENT_PRICE',
+  'MARKET_SESSION',
+  'EARNINGS_SCHEDULE_KNOWN',
+  'NEXT_EARNINGS_AT',
+])
 
 function object(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -42,16 +69,31 @@ function canonicalUtc(value) {
   }
 }
 
-function usesReservedPriceNamespace(privateCase) {
-  const sourceFact = Array.isArray(privateCase.sourceSnapshots) &&
+function validTimingPolicy(timing) {
+  const policy = timing?.policy
+  return object(timing) && Object.keys(timing).length === 1 && object(policy) &&
+    hasOnlyKeys(policy, TIMING_POLICY_KEYS) &&
+    TIMING_POLICY_KEYS.every(key => Object.hasOwn(policy, key)) &&
+    policy.schemaVersion === 2 &&
+    Number.isFinite(policy.maxQuoteAgeMs) && policy.maxQuoteAgeMs >= 0 &&
+    Number.isFinite(policy.maxFutureSkewMs) && policy.maxFutureSkewMs >= 0 &&
+    Number.isInteger(policy.earningsRiskWindowDays) && policy.earningsRiskWindowDays >= 0
+}
+
+function usesReservedMachineNamespace(privateCase) {
+  const source = Array.isArray(privateCase.sourceSnapshots) &&
     privateCase.sourceSnapshots.some(snapshot =>
-      Array.isArray(snapshot?.payload?.facts) &&
-      snapshot.payload.facts.some(fact => fact?.factKey === 'CURRENT_PRICE'))
+      MACHINE_SOURCE_KINDS.has(snapshot?.payload?.kind) ||
+      (Array.isArray(snapshot?.payload?.facts) &&
+        snapshot.payload.facts.some(fact => MACHINE_FACTS.has(fact?.factKey))))
   const evidenceDraft = Array.isArray(privateCase.evidence?.drafts) &&
     privateCase.evidence.drafts.some(draft =>
-      draft?.key === 'price' || draft?.claimKey === 'PRICE' ||
-      draft?.factKey === 'CURRENT_PRICE')
-  return sourceFact || evidenceDraft
+      MACHINE_DRAFT_KEYS.has(draft?.key) || MACHINE_CLAIMS.has(draft?.claimKey) ||
+      MACHINE_FACTS.has(draft?.factKey))
+  const sourcePolicy = object(privateCase.evidence?.sourcePolicy?.kinds) &&
+    Object.keys(privateCase.evidence.sourcePolicy.kinds)
+      .some(kind => MACHINE_SOURCE_KINDS.has(kind))
+  return source || evidenceDraft || sourcePolicy
 }
 
 function parseStatArtifact(value, qualityManifest) {
@@ -77,37 +119,14 @@ function parseStatArtifact(value, qualityManifest) {
   return { stat, qualityManifest: matches ? qualityManifest : null }
 }
 
-function yahooPriceSource(symbol, row) {
-  if (!object(row) || !Number.isFinite(row.Close) ||
-      !canonicalUtc(row.asOf) || !canonicalUtc(row.observedAt) ||
-      row.currency !== 'USD') return null
-
-  return createSnapshot('source', {
-    role: 'SOURCE',
-    kind: 'YAHOO_MARKET_DATA',
-    schemaVersion: 1,
-    symbol,
-    currency: row.currency,
-    asOf: row.asOf,
-    observedAt: row.observedAt,
-    facts: [{
-      factKey: 'CURRENT_PRICE',
-      value: row.Close,
-      asOf: row.asOf,
-      scope: { symbol },
-      currency: row.currency,
-    }],
-  })
-}
-
 export function evaluateSymbolCase(input) {
   if (!object(input) || !hasOnlyKeys(input, INPUT_KEYS) ||
       INPUT_KEYS.some(key => !Object.hasOwn(input, key)) ||
       typeof input.statArtifact !== 'string' ||
       !canonicalUtc(input.evaluatedAt) ||
       !object(input.privateCase) || !hasOnlyKeys(input.privateCase, PRIVATE_CASE_KEYS) ||
-      input.privateCase?.timing?.policy?.currentPriceFactKey !== 'CURRENT_PRICE' ||
-      usesReservedPriceNamespace(input.privateCase)) {
+      !validTimingPolicy(input.privateCase.timing) ||
+      usesReservedMachineNamespace(input.privateCase)) {
     throw inputError()
   }
 
@@ -117,49 +136,11 @@ export function evaluateSymbolCase(input) {
     : source.symbol
   const privateCase = source.privateCase
   const parsed = parseStatArtifact(source.statArtifact, source.qualityManifest)
-  const row = parsed.qualityManifest ? parsed.stat[symbol] : undefined
-  const yahooSource = yahooPriceSource(symbol, row)
   const evidence = privateCase.evidence
 
-  if (object(evidence?.sourcePolicy?.kinds) &&
-      Object.hasOwn(evidence.sourcePolicy.kinds, 'YAHOO_MARKET_DATA') &&
-      evidence.sourcePolicy.kinds.YAHOO_MARKET_DATA !== 'SECONDARY') {
-    throw inputError()
-  }
-
-  let canonicalEvidence = evidence
-  if (object(evidence) && object(evidence.sourcePolicy) &&
-      object(evidence.sourcePolicy.kinds)) {
-    canonicalEvidence = {
-      ...evidence,
-      sourcePolicy: {
-        ...evidence.sourcePolicy,
-        kinds: { ...evidence.sourcePolicy.kinds, YAHOO_MARKET_DATA: 'SECONDARY' },
-      },
-      drafts: Array.isArray(evidence.drafts) && yahooSource
-        ? [...evidence.drafts, {
-            key: 'price',
-            claimKey: 'PRICE',
-            factKey: 'CURRENT_PRICE',
-            value: row.Close,
-            sourceRef: yahooSource.ref.id,
-            asOf: row.asOf,
-            scope: { symbol },
-            currency: row.currency,
-            stance: 'SUPPORTS',
-            confidence: 1,
-          }]
-        : evidence.drafts,
-    }
-  }
-
-  const sourceSnapshots = Array.isArray(privateCase.sourceSnapshots) && yahooSource
-    ? [...privateCase.sourceSnapshots, yahooSource.resolved]
-    : privateCase.sourceSnapshots
-
-  let portfolio = null
+  let robinhood = null
   try {
-    portfolio = deriveRobinhoodPortfolioInput({
+    robinhood = deriveRobinhoodInputs({
       symbol,
       evaluatedAt: source.evaluatedAt,
       stat: parsed.stat,
@@ -167,9 +148,24 @@ export function evaluateSymbolCase(input) {
       capacityPolicy: privateCase.capacityPolicy,
     })
   } catch (error) {
-    if (error?.code !== 'INVALID_ROBINHOOD_PORTFOLIO_INPUT') throw error
-    portfolio = null
+    if (error?.code !== 'INVALID_ROBINHOOD_READ_INPUT') throw error
+    robinhood = null
   }
+
+  const canonicalEvidence = robinhood && object(evidence) && object(evidence.sourcePolicy) &&
+      object(evidence.sourcePolicy.kinds) && Array.isArray(evidence.drafts)
+    ? {
+        ...evidence,
+        sourcePolicy: {
+          ...evidence.sourcePolicy,
+          kinds: { ...evidence.sourcePolicy.kinds, ...robinhood.sourceKinds },
+        },
+        drafts: [...evidence.drafts, ...robinhood.evidenceDrafts],
+      }
+    : evidence
+  const sourceSnapshots = robinhood && Array.isArray(privateCase.sourceSnapshots)
+    ? [...privateCase.sourceSnapshots, ...robinhood.sourceSnapshots]
+    : privateCase.sourceSnapshots
 
   return evaluateWorkbench({
     schemaVersion: privateCase.schemaVersion,
@@ -184,7 +180,7 @@ export function evaluateSymbolCase(input) {
     evidence: canonicalEvidence,
     underwriting: privateCase.underwriting,
     timing: privateCase.timing,
-    portfolio,
+    portfolio: robinhood?.portfolio ?? null,
     decisionPolicy: privateCase.decisionPolicy,
   })
 }

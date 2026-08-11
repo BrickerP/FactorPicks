@@ -5,24 +5,101 @@ import { deriveEvidenceBundle } from '../src/domain/evidence.js'
 import { deriveTimingAssessment, projectTimingAssessment } from '../src/domain/timingAssessment.js'
 import { evaluateWorkbench } from '../src/domain/workbench.js'
 import { createSnapshot } from '../src/domain/contentAddressing.js'
-import { AS_OF, NOW, rawCase, sourceSnapshot } from './fixtures/workbench-fixture.js'
+import {
+  AS_OF,
+  NOW,
+  earningsSourceSnapshot,
+  rawCase,
+} from './fixtures/workbench-fixture.js'
+
+function derivedTiming(input = rawCase()) {
+  const evidenceResult = deriveEvidenceBundle({
+    ...input.evidence,
+    symbol: 'AAA',
+    evaluatedAt: NOW,
+    resolvedSnapshots: input.sourceSnapshots,
+  })
+  const resolved = [...input.sourceSnapshots, ...evidenceResult.resolvedSnapshots]
+  const timing = deriveTimingAssessment({
+    symbol: 'AAA',
+    evaluatedAt: NOW,
+    evidence: evidenceResult.evidence,
+    resolvedSnapshots: resolved,
+    policy: input.timing.policy,
+  })
+  return { evidenceResult, resolved, timing }
+}
+
+function withNextEarnings(input, value = {
+  date: '2026-08-11', timing: 'pm', verified: false,
+}) {
+  const earnings = earningsSourceSnapshot({ nextEarnings: value })
+  input.sourceSnapshots = input.sourceSnapshots.map(snapshot =>
+    snapshot.payload.kind === 'ROBINHOOD_EARNINGS_CALENDAR'
+      ? earnings.resolved
+      : snapshot)
+  input.evidence.drafts = input.evidence.drafts.map(draft =>
+    draft.key === 'earnings-schedule-known'
+      ? { ...draft, sourceRef: earnings.ref.id }
+      : draft)
+  input.evidence.drafts.push({
+    key: 'next-earnings-at',
+    claimKey: 'EARNINGS_SCHEDULE',
+    factKey: 'NEXT_EARNINGS_AT',
+    value,
+    sourceRef: earnings.ref.id,
+    asOf: NOW,
+    scope: { symbol: 'AAA' },
+    stance: 'SUPPORTS',
+    confidence: 1,
+  })
+  return input
+}
+
+function withMarketAsOf(input, asOf) {
+  input.sourceSnapshots = input.sourceSnapshots.map(snapshot => {
+    if (snapshot.payload.kind !== 'ROBINHOOD_EQUITY_QUOTE') return snapshot
+    const payload = structuredClone(snapshot.payload)
+    payload.asOf = asOf
+    payload.facts = payload.facts.map(fact => ({ ...fact, asOf }))
+    const replacement = createSnapshot('source', payload)
+    input.evidence.drafts = input.evidence.drafts.map(draft =>
+      ['price', 'market-session'].includes(draft.key)
+        ? { ...draft, sourceRef: replacement.ref.id, asOf }
+        : draft)
+    return replacement.resolved
+  })
+  return input
+}
+
+function withMarketSession(input, value) {
+  input.sourceSnapshots = input.sourceSnapshots.map(snapshot => {
+    if (snapshot.payload.kind !== 'ROBINHOOD_EQUITY_QUOTE') return snapshot
+    const payload = structuredClone(snapshot.payload)
+    payload.facts = payload.facts.map(fact => fact.factKey === 'MARKET_SESSION'
+      ? { ...fact, value }
+      : fact)
+    const replacement = createSnapshot('source', payload)
+    input.evidence.drafts = input.evidence.drafts.map(draft => {
+      if (!['price', 'market-session'].includes(draft.key)) return draft
+      return {
+        ...draft,
+        sourceRef: replacement.ref.id,
+        ...(draft.key === 'market-session' ? { value } : {}),
+      }
+    })
+    return replacement.resolved
+  })
+  return input
+}
 
 test('timing derives evaluated price and rejects caller status/price fields', () => {
-  const source = sourceSnapshot()
-  const evidenceResult = deriveEvidenceBundle({
-    ...rawCase().evidence,
-    symbol: 'AAA', evaluatedAt: NOW, resolvedSnapshots: [source.resolved],
-  })
-  const resolved = [source.resolved, ...evidenceResult.resolvedSnapshots]
+  const { evidenceResult, resolved, timing } = derivedTiming()
   assert.throws(() => deriveTimingAssessment({
     symbol: 'AAA', evaluatedAt: NOW, evidence: evidenceResult.evidence,
     resolvedSnapshots: resolved, policy: rawCase().timing.policy,
     status: 'FAIL', evaluatedPrice: { value: 1 },
   }), /Timing assessment input is invalid/)
-  const timing = deriveTimingAssessment({
-    symbol: 'AAA', evaluatedAt: NOW, evidence: evidenceResult.evidence,
-    resolvedSnapshots: resolved, policy: rawCase().timing.policy,
-  })
   assert.equal(timing.timingAssessment.status, 'PASS')
   assert.equal(timing.evaluatedPrice.value, 95)
   assert.throws(() => deriveTimingAssessment({
@@ -33,14 +110,10 @@ test('timing derives evaluated price and rejects caller status/price fields', ()
 })
 
 test('timing derivation rejects every derived artifact field at the public seam', () => {
-  const source = sourceSnapshot()
-  const evidenceResult = deriveEvidenceBundle({
-    ...rawCase().evidence,
-    symbol: 'AAA', evaluatedAt: NOW, resolvedSnapshots: [source.resolved],
-  })
+  const { evidenceResult, resolved } = derivedTiming()
   const base = {
     symbol: 'AAA', evaluatedAt: NOW, evidence: evidenceResult.evidence,
-    resolvedSnapshots: [source.resolved, ...evidenceResult.resolvedSnapshots],
+    resolvedSnapshots: resolved,
     policy: rawCase().timing.policy,
   }
   for (const field of [
@@ -53,43 +126,72 @@ test('timing derivation rejects every derived artifact field at the public seam'
 })
 
 test('timing derives FAIL and EVENT_RISK from evidence stances', () => {
-  const source = sourceSnapshot()
   for (const expected of ['FAIL', 'EVENT_RISK']) {
     const input = rawCase()
-    const draft = input.evidence.drafts.find(item => item.key === 'pass')
-    const passSupport = { ...draft, key: 'pass-support', stance: 'SUPPORTS' }
     if (expected === 'FAIL') {
-      draft.stance = 'CHALLENGES'
-      input.evidence.drafts.push(passSupport)
+      input.evidence.drafts.find(item => item.key === 'market-session').stance = 'CHALLENGES'
     } else {
-      draft.claimKey = 'EVENT_RISK'
-      draft.factKey = 'EVENT_RISK'
-      input.evidence.drafts.push(passSupport)
+      withNextEarnings(input)
     }
-    const evidenceResult = deriveEvidenceBundle({
-      ...input.evidence, symbol: 'AAA', evaluatedAt: NOW, resolvedSnapshots: [source.resolved],
-    })
-    const timing = deriveTimingAssessment({ symbol: 'AAA', evaluatedAt: NOW,
-      evidence: evidenceResult.evidence, resolvedSnapshots: [source.resolved, ...evidenceResult.resolvedSnapshots],
-      policy: input.timing.policy })
+    const { timing } = derivedTiming(input)
     assert.equal(timing.timingAssessment.status, expected)
   }
 })
 
-test('timing event risk requires independent pass support', () => {
+test('timing event risk requires independent regular-session support', () => {
   const input = rawCase()
-  const draft = input.evidence.drafts.find(item => item.key === 'pass')
-  draft.claimKey = 'EVENT_RISK'
-  draft.factKey = 'EVENT_RISK'
-  const source = sourceSnapshot()
-  const evidenceResult = deriveEvidenceBundle({
-    ...input.evidence, symbol: 'AAA', evaluatedAt: NOW, resolvedSnapshots: [source.resolved],
-  })
-  const timing = deriveTimingAssessment({ symbol: 'AAA', evaluatedAt: NOW,
-    evidence: evidenceResult.evidence,
-    resolvedSnapshots: [source.resolved, ...evidenceResult.resolvedSnapshots],
-    policy: input.timing.policy })
+  withNextEarnings(input)
+  input.evidence.drafts = input.evidence.drafts.filter(draft => draft.key !== 'market-session')
+  const { timing } = derivedTiming(input)
   assert.equal(timing.timingAssessment.status, 'BLOCKED')
+})
+
+test('timing computes the New York earnings window and includes tentative reports', () => {
+  for (const scenario of [
+    { date: '2026-08-11', verified: false, expected: 'EVENT_RISK' },
+    { date: '2026-08-17', verified: true, expected: 'EVENT_RISK' },
+    { date: '2026-08-18', verified: false, expected: 'PASS' },
+  ]) {
+    const input = withNextEarnings(rawCase(), {
+      date: scenario.date,
+      timing: 'am',
+      verified: scenario.verified,
+    })
+    assert.equal(derivedTiming(input).timing.timingAssessment.status, scenario.expected)
+  }
+})
+
+test('timing blocks extended sessions, closed evaluation time, and missing earnings authority', () => {
+  const extended = derivedTiming(withMarketSession(rawCase(), 'EXTENDED')).timing
+  assert.equal(extended.timingAssessment.status, 'BLOCKED')
+  assert.deepEqual(extended.timingAssessment.reasonCodes, ['TIMING_MARKET_CLOSED'])
+
+  const afterHours = rawCase({ evaluatedAt: '2026-08-10T20:02:00.000Z' })
+  const afterHoursResult = evaluateWorkbench(afterHours)
+  assert.equal(afterHoursResult.dataStatus, 'EVALUATION_BLOCKED')
+  assert.equal(afterHoursResult.buyAction, 'NO_ACTION')
+
+  const missingSchedule = rawCase()
+  missingSchedule.evidence.drafts = missingSchedule.evidence.drafts
+    .filter(draft => draft.key !== 'earnings-schedule-known')
+  const missing = derivedTiming(missingSchedule).timing
+  assert.equal(missing.timingAssessment.status, 'BLOCKED')
+  assert.deepEqual(missing.timingAssessment.reasonCodes, ['TIMING_EARNINGS_MISSING'])
+})
+
+test('regular session boundaries include exactly 16:00:00 but exclude later seconds and milliseconds', () => {
+  assert.equal(evaluateWorkbench(rawCase({
+    evaluatedAt: '2026-08-10T20:00:00.000Z',
+  })).dataStatus, 'VALID')
+
+  for (const evaluatedAt of [
+    '2026-08-10T20:00:00.001Z',
+    '2026-08-10T20:00:59.000Z',
+  ]) {
+    const result = evaluateWorkbench(rawCase({ evaluatedAt }))
+    assert.equal(result.dataStatus, 'EVALUATION_BLOCKED')
+    assert.equal(result.buyAction, 'NO_ACTION')
+  }
 })
 
 test('workbench runs the full headless path and opens the worked case', () => {
@@ -107,11 +209,7 @@ test('workbench runs the full headless path and opens the worked case', () => {
 })
 
 test('workbench blocks missing or stale timing quote and ignores supplied timing status', () => {
-  const stale = rawCase()
-  stale.evidence.drafts[0].asOf = '2026-08-10T07:00:00.000Z'
-  stale.sourceSnapshots[0].payload.facts[0].asOf = '2026-08-10T07:00:00.000Z'
-  stale.sourceSnapshots[0].payload.asOf = '2026-08-10T07:00:00.000Z'
-  stale.sourceSnapshots[0].payload.observedAt = '2026-08-10T07:00:00.000Z'
+  const stale = withMarketAsOf(rawCase(), '2026-08-10T19:30:00.000Z')
   stale.timing.status = 'PASS'
   assert.throws(() => evaluateWorkbench(stale), /Derived timing is not accepted/)
   delete stale.timing.status
@@ -121,14 +219,7 @@ test('workbench blocks missing or stale timing quote and ignores supplied timing
 })
 
 test('timing projector rejects tampering and wrong symbol', () => {
-  const source = sourceSnapshot()
-  const evidenceResult = deriveEvidenceBundle({
-    ...rawCase().evidence,
-    symbol: 'AAA', evaluatedAt: NOW, resolvedSnapshots: [source.resolved],
-  })
-  const resolved = [source.resolved, ...evidenceResult.resolvedSnapshots]
-  const timing = deriveTimingAssessment({ symbol: 'AAA', evaluatedAt: NOW,
-    evidence: evidenceResult.evidence, resolvedSnapshots: resolved, policy: rawCase().timing.policy })
+  const { evidenceResult, resolved, timing } = derivedTiming()
   const all = [...resolved, ...timing.resolvedSnapshots]
   assert.equal(projectTimingAssessment({ ...timing.timingAssessment, status: 'FAIL' }, 'AAA',
     evidenceResult.evidence, all, { evaluatedAt: NOW }), null)
@@ -137,7 +228,7 @@ test('timing projector rejects tampering and wrong symbol', () => {
   assert.equal(projectTimingAssessment(timing.timingAssessment, 'AAA', evidenceResult.evidence,
     [...all, all[0]], { evaluatedAt: NOW }), null)
   const timingResolved = all.find(item => item.id === timing.timingAssessment.snapshotRef.id)
-  const wrongAsOf = '2026-08-10T07:00:00.000Z'
+  const wrongAsOf = '2026-08-10T19:00:00.000Z'
   const rehashed = createSnapshot('timing-assessment', {
     ...timingResolved.payload,
     asOf: wrongAsOf,
@@ -148,18 +239,11 @@ test('timing projector rejects tampering and wrong symbol', () => {
 })
 
 test('timing projector rejects policy/evidence payload and binding tampering', () => {
-  const source = sourceSnapshot()
-  const evidenceResult = deriveEvidenceBundle({
-    ...rawCase().evidence,
-    symbol: 'AAA', evaluatedAt: NOW, resolvedSnapshots: [source.resolved],
-  })
-  const resolved = [source.resolved, ...evidenceResult.resolvedSnapshots]
-  const timing = deriveTimingAssessment({ symbol: 'AAA', evaluatedAt: NOW,
-    evidence: evidenceResult.evidence, resolvedSnapshots: resolved, policy: rawCase().timing.policy })
+  const { evidenceResult, resolved, timing } = derivedTiming()
   const all = [...resolved, ...timing.resolvedSnapshots]
   const policy = all.find(item => item.id === timing.timingAssessment.timingPolicyRef.id)
   const tamperedPolicy = structuredClone(policy)
-  tamperedPolicy.payload.policy.maxAgeMs = 1
+  tamperedPolicy.payload.policy.maxQuoteAgeMs = 1
   assert.equal(projectTimingAssessment(timing.timingAssessment, 'AAA', evidenceResult.evidence,
     [...all.filter(item => item.id !== policy.id), tamperedPolicy], { evaluatedAt: NOW }), null)
   assert.equal(projectTimingAssessment({ ...timing.timingAssessment,
@@ -181,23 +265,7 @@ test('timing projector rejects policy/evidence payload and binding tampering', (
 })
 
 test('timing projector applies strict context freshness to referenced support', () => {
-  const input = rawCase()
-  const stalePassAsOf = '2026-08-10T07:59:59.999Z'
-  const payload = structuredClone(input.sourceSnapshots[0].payload)
-  payload.facts = payload.facts.map(fact => fact.factKey === 'TIMING_PASS'
-    ? { ...fact, asOf: stalePassAsOf } : fact)
-  const source = createSnapshot('source', payload)
-  input.sourceSnapshots = [source.resolved]
-  input.evidence.drafts = input.evidence.drafts.map(draft => draft.sourceRef
-    ? { ...draft, sourceRef: source.ref.id,
-        ...(draft.key === 'pass' ? { asOf: stalePassAsOf } : {}) }
-    : draft)
-  const evidenceResult = deriveEvidenceBundle({
-    ...input.evidence, symbol: 'AAA', evaluatedAt: NOW, resolvedSnapshots: [source.resolved],
-  })
-  const resolved = [source.resolved, ...evidenceResult.resolvedSnapshots]
-  const timing = deriveTimingAssessment({ symbol: 'AAA', evaluatedAt: NOW,
-    evidence: evidenceResult.evidence, resolvedSnapshots: resolved, policy: input.timing.policy })
+  const { evidenceResult, resolved, timing } = derivedTiming()
   assert.equal(projectTimingAssessment(timing.timingAssessment, 'AAA', evidenceResult.evidence,
     [...resolved, ...timing.resolvedSnapshots], {
       evaluatedAt: NOW, maxInputAgeMs: 0, maxFutureSkewMs: 60_000,
@@ -205,15 +273,9 @@ test('timing projector applies strict context freshness to referenced support', 
 })
 
 test('a derived BLOCKED timing artifact yields no partial timing projection', () => {
-  const source = sourceSnapshot()
   const input = rawCase()
-  input.evidence.drafts = input.evidence.drafts.filter(draft => !['price', 'pass'].includes(draft.key))
-  const evidenceResult = deriveEvidenceBundle({
-    ...input.evidence, symbol: 'AAA', evaluatedAt: NOW, resolvedSnapshots: [source.resolved],
-  })
-  const timing = deriveTimingAssessment({ symbol: 'AAA', evaluatedAt: NOW,
-    evidence: evidenceResult.evidence, resolvedSnapshots: [source.resolved, ...evidenceResult.resolvedSnapshots],
-    policy: input.timing.policy })
+  input.evidence.drafts = input.evidence.drafts.filter(draft => draft.key !== 'price')
+  const { timing } = derivedTiming(input)
   assert.equal(timing.timingAssessment.status, 'BLOCKED')
   assert.equal(timing.evaluatedPrice, null)
 })
@@ -291,20 +353,21 @@ test('malformed or duplicate source snapshots are semantic evidence failures', (
   assert.ok(duplicateResult.blockerCodes.includes('INVALID_EVIDENCE_BUNDLE'))
 })
 
-test('timing overlap and missing pass support fail closed without changing long-term gate', () => {
+test('timing overlap and missing session support fail closed without changing long-term gate', () => {
   const overlap = rawCase()
-  overlap.evidence.gatePolicy.gates[0].claimKey = 'TIMING_PASS'
+  overlap.evidence.gatePolicy.gates[0].claimKey = 'MARKET_SESSION'
   const overlapResult = evaluateWorkbench(overlap)
   assert.equal(overlapResult.dataStatus, 'EVALUATION_BLOCKED')
   assert.ok(overlapResult.blockerCodes.includes('INVALID_TIMING_ASSESSMENT'))
 
-  const noPass = rawCase()
-  noPass.evidence.drafts = noPass.evidence.drafts.filter(draft => draft.key !== 'pass')
-  const noPassResult = evaluateWorkbench(noPass)
-  assert.equal(noPassResult.dataStatus, 'EVALUATION_BLOCKED')
-  assert.equal(noPassResult.buyAction, 'NO_ACTION')
-  assert.ok(noPassResult.blockerCodes.includes('TIMING_BLOCKED'))
-  assert.equal(noPassResult.underwriting.longTermGate, 'PASS')
+  const noSession = rawCase()
+  noSession.evidence.drafts = noSession.evidence.drafts
+    .filter(draft => draft.key !== 'market-session')
+  const noSessionResult = evaluateWorkbench(noSession)
+  assert.equal(noSessionResult.dataStatus, 'EVALUATION_BLOCKED')
+  assert.equal(noSessionResult.buyAction, 'NO_ACTION')
+  assert.ok(noSessionResult.blockerCodes.includes('TIMING_BLOCKED'))
+  assert.equal(noSessionResult.underwriting.longTermGate, 'PASS')
 })
 
 test('workbench derives the five actions from the same long-term case', () => {
@@ -316,15 +379,11 @@ test('workbench derives the five actions from the same long-term case', () => {
     industry: 'Software' }]
   assert.equal(evaluateWorkbench(add).buyAction, 'ADD')
 
-  const pilot = rawCase()
-  const event = pilot.evidence.drafts.find(draft => draft.key === 'pass')
-  pilot.evidence.drafts.push({ ...event, key: 'pass-support', stance: 'SUPPORTS' })
-  event.claimKey = 'EVENT_RISK'
-  event.factKey = 'EVENT_RISK'
+  const pilot = withNextEarnings(rawCase())
   assert.equal(evaluateWorkbench(pilot).buyAction, 'PILOT')
 
   const watch = rawCase()
-  watch.evidence.drafts.find(draft => draft.key === 'pass').stance = 'CHALLENGES'
+  watch.evidence.drafts.find(draft => draft.key === 'market-session').stance = 'CHALLENGES'
   assert.equal(evaluateWorkbench(watch).buyAction, 'WATCH')
 
   const noAction = rawCase()
@@ -333,17 +392,7 @@ test('workbench derives the five actions from the same long-term case', () => {
 })
 
 test('a stale quote is a canonical timing block with no evaluated price', () => {
-  const input = rawCase()
-  const staleAsOf = '2026-08-10T07:30:00.000Z'
-  const payload = structuredClone(input.sourceSnapshots[0].payload)
-  payload.facts = payload.facts.map(fact => fact.factKey === 'CURRENT_PRICE'
-    ? { ...fact, asOf: staleAsOf } : fact)
-  const source = createSnapshot('source', payload)
-  input.sourceSnapshots = [source.resolved]
-  input.evidence.drafts = input.evidence.drafts.map(draft => draft.sourceRef
-    ? { ...draft, sourceRef: source.ref.id,
-        ...(draft.key === 'price' ? { asOf: staleAsOf } : {}) }
-    : draft)
+  const input = withMarketAsOf(rawCase(), '2026-08-10T19:30:00.000Z')
   const result = evaluateWorkbench(input)
   assert.equal(result.dataStatus, 'EVALUATION_BLOCKED')
   assert.equal(result.evaluatedPrice, null)

@@ -36,7 +36,7 @@ test('underwriting and decision revalidate evidence freshness at their own curre
   })), { code: 'INVALID_STRUCTURED_UNDERWRITING_INPUT' })
 
   const input = decisionInput({
-    now: '2026-08-09T10:00:00.000Z',
+    now: '2026-08-11T20:00:00.000Z',
     decisionPolicy: { maxInputAgeMs: 86_400_000 },
   })
   const result = evaluateDecision(input)

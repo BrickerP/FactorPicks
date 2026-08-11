@@ -10,8 +10,8 @@ import { evaluateSymbolCase } from '../src/domain/evaluateSymbolCase.js'
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const DEFAULT_MARKET_URL = 'https://brickerp.github.io/FactorPicks/'
-const USAGE = 'Usage: npm run workbench -- --symbol SYMBOL --case private-case.json --robinhood - [--market-url base] [--evaluated-at ISO] [--ledger external-path]'
-const COLLECTED_PORTFOLIO_ERROR = 'Unable to load collected portfolio input'
+const USAGE = 'Usage: npm run workbench -- --symbol SYMBOL --case private-case.json [--market-url base] [--evaluated-at ISO] [--ledger external-path]'
+const ROBINHOOD_READ_ERROR = 'Unable to load Robinhood read input'
 
 function assertOutsideRepository(path) {
   const repositoryRelativePath = relative(REPOSITORY_ROOT, path)
@@ -183,7 +183,6 @@ function parseArguments(args) {
   const names = new Set([
     '--symbol',
     '--case',
-    '--robinhood',
     '--market-url',
     '--evaluated-at',
     '--ledger',
@@ -197,7 +196,7 @@ function parseArguments(args) {
     index += 1
   }
   if (!options.has('--symbol') || !options.has('--case') ||
-      options.get('--case') === '-' || options.get('--robinhood') !== '-') {
+      options.get('--case') === '-') {
     throw new Error(USAGE)
   }
   return {
@@ -234,28 +233,28 @@ async function readPrivateCase(casePath) {
   return privateCase
 }
 
-async function readCollectedPortfolio() {
+async function readRobinhoodRead() {
   let json = ''
   try {
     process.stdin.setEncoding('utf8')
     for await (const chunk of process.stdin) json += chunk
   } catch {
-    const error = new Error(COLLECTED_PORTFOLIO_ERROR)
-    error.code = 'COLLECTED_PORTFOLIO_READ_ERROR'
+    const error = new Error(ROBINHOOD_READ_ERROR)
+    error.code = 'ROBINHOOD_READ_ERROR'
     throw error
   }
   let robinhoodRead
   try {
     robinhoodRead = JSON.parse(json)
   } catch {
-    const error = new TypeError(COLLECTED_PORTFOLIO_ERROR)
-    error.code = 'INVALID_COLLECTED_PORTFOLIO_JSON'
+    const error = new TypeError(ROBINHOOD_READ_ERROR)
+    error.code = 'INVALID_ROBINHOOD_READ_JSON'
     throw error
   }
   if (robinhoodRead === null || Array.isArray(robinhoodRead) ||
       typeof robinhoodRead !== 'object') {
-    const error = new TypeError(COLLECTED_PORTFOLIO_ERROR)
-    error.code = 'INVALID_COLLECTED_PORTFOLIO_JSON'
+    const error = new TypeError(ROBINHOOD_READ_ERROR)
+    error.code = 'INVALID_ROBINHOOD_READ_JSON'
     throw error
   }
   return robinhoodRead
@@ -338,7 +337,7 @@ async function main() {
     ? undefined
     : await resolveLedgerPath(ledgerPath)
   const privateCase = await readPrivateCase(casePath)
-  const robinhoodRead = await readCollectedPortfolio()
+  const robinhoodRead = await readRobinhoodRead()
   const { statArtifact, qualityManifest } = await readPublicMarket(marketUrl)
   const decision = evaluateSymbolCase({
     symbol,
@@ -357,9 +356,9 @@ async function main() {
 
 function safeErrorMessage(error) {
   if (error?.code === 'INVALID_PRIVATE_CASE_JSON') return error.message
-  if (error?.code === 'INVALID_COLLECTED_PORTFOLIO_JSON') return COLLECTED_PORTFOLIO_ERROR
+  if (error?.code === 'INVALID_ROBINHOOD_READ_JSON') return ROBINHOOD_READ_ERROR
   if (error?.code === 'PRIVATE_CASE_READ_ERROR') return 'Unable to read private case'
-  if (error?.code === 'COLLECTED_PORTFOLIO_READ_ERROR') return COLLECTED_PORTFOLIO_ERROR
+  if (error?.code === 'ROBINHOOD_READ_ERROR') return ROBINHOOD_READ_ERROR
   if (error?.code === 'PUBLIC_MARKET_DATA_ERROR') return 'Unable to load public market data'
   if (error?.message === USAGE) return USAGE
   if (error?.message?.startsWith('Ledger')) return error.message

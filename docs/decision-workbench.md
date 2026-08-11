@@ -4,16 +4,19 @@ This document is the current non-UI contract for FactorPicks. The sole local
 entry point is:
 
 ```bash
-npm run workbench -- --symbol AAPL --case private-case.json --robinhood - \
+npm run workbench -- --symbol AAPL --case private-case.json \
   [--market-url https://brickerp.github.io/FactorPicks/] \
   [--evaluated-at 2026-08-10T08:00:00.000Z] \
   [--ledger /external/private/decisions.jsonl]
 ```
 
 The CLI reads the private case only from the named local file and reads one
-canonical `RobinhoodReadV1` collector bundle of allow-listed normalized
-projections only from stdin. `--case -` and any
-`--robinhood` value other than `-` are rejected before stdin or network access.
+canonical `RobinhoodReadV2` collector bundle of allow-listed normalized
+projections implicitly from stdin. `--case -`, the retired `--robinhood` flag,
+and every unknown or trading parameter are rejected before stdin or network
+access. The invoking Codex runtime must pipe the collector result and close
+stdin; plain interactive invocation without a pipe intentionally waits for its
+only private provider input.
 It then makes exactly two public, bodyless requests: `GET <base>/stat.json` and
 `GET <base>/data-quality.json`. The default base is
 `https://brickerp.github.io/FactorPicks/`. No private case value is sent in a
@@ -33,13 +36,13 @@ semantic blocker, never a fallback to an unbound market object.
 The stage order is fixed:
 
 ```text
-public stat + quality manifest + private case + RobinhoodReadV1 collector bundle
+public stat + quality manifest + private case + RobinhoodReadV2 collector bundle
   → evaluateSymbolCase
   → evaluateResearch
+  → deriveRobinhoodInputs
   → deriveEvidenceBundle
   → deriveStructuredUnderwriting
   → deriveTimingAssessment
-  → deriveRobinhoodPortfolioInput
   → derivePortfolioCapacitySnapshot
   → evaluateDecision
 ```
@@ -49,24 +52,32 @@ The private case accepts exactly `schemaVersion`, `researchPolicy`,
 `decisionPolicy`. Symbol and evaluation time are CLI values. The public universe
 and quality manifest come only from the two public responses. A private case
 must not reintroduce `research`, occupy the reserved current-price Evidence
-namespace (`key=price`, `claimKey=PRICE`, `factKey=CURRENT_PRICE`), submit a
-different timing `currentPriceFactKey`, or provide derived Evidence,
-valuation/entry output, timing status, capacity snapshot, sizing, or action.
+namespace, occupy the machine session/earnings namespaces, or provide derived
+Evidence, valuation/entry output, timing status, capacity snapshot, sizing, or
+action. Its timing policy accepts exactly `schemaVersion=2`, `maxQuoteAgeMs`,
+`maxFutureSkewMs`, and `earningsRiskWindowDays`; all timing claim/fact keys are
+fixed inside the projector.
 
 Only after the raw artifact and manifest agree does the adapter select a public
-row. That row is the only current-price authority: its `Close`, `asOf`,
-`observedAt`, and `currency` become one secondary Yahoo market-data observation.
-The adapter injects that observation only into the reserved `price` / `PRICE` /
-`CURRENT_PRICE` Evidence namespace, and the timing policy is fixed to
-`currentPriceFactKey=CURRENT_PRICE`. Analyst targets, historical prices, and
-other price-like facts may remain ordinary Evidence under distinct keys, claims,
-and fact keys. They may support underwriting, but cannot satisfy the reserved
-current-price lookup or become `evaluatedPrice`. The adapter does not infer a
-missing or stale quote, thesis, valuation, entry range, timing state, account
+row for research and sector/industry classification. Yahoo `Close` is not a
+real-time price authority and is never promoted to `CURRENT_PRICE`.
+`deriveRobinhoodInputs` validates that the V2 target equals the CLI symbol, then
+creates the only machine quote candidate, its `REGULAR`/`EXTENDED` session fact,
+and earnings sources and Evidence. `deriveTimingAssessment` is the sole
+freshness/session authority and permits only one fresh, active, traded
+regular-hours candidate. An official close is never a live-price fallback;
+pre-market, after-hours, weekend, stale, future, conflicting, missing, or
+untraded state is blocked. An upcoming verified or tentative earnings
+report inside the configured day window produces `EVENT_RISK`. Empty,
+unavailable, ambiguous, or malformed earnings data is blocked; a non-empty
+resolved history with no upcoming report may pass. Analyst targets, historical
+prices, and other price-like facts may remain ordinary Evidence under distinct
+keys, claims, and fact keys, but cannot become `evaluatedPrice`. The adapter does
+not infer missing quote, thesis, valuation, entry range, timing state, account
 capacity, personal limits, policy, or action from ranks or neighboring symbols.
 Missing, stale, conflicting, or wrong-symbol semantic data returns
 `EVALUATION_BLOCKED` + `NO_ACTION` with exit zero. Invalid argv, private-case
-JSON/top-level shape, collected-bundle stdin transport/JSON or missing collection,
+JSON/top-level shape, V2 stdin transport/JSON or missing collection,
 public HTTP/non-object JSON, URL, or file I/O exits one with generalized stderr.
 A parsed but semantically invalid collector bundle is a domain blocker and also
 returns `EVALUATION_BLOCKED` + `NO_ACTION` with exit zero.
@@ -79,7 +90,7 @@ override it.
 
 Downstream freshness applies to every Evidence item's `asOf` and `observedAt`,
 using the stricter of the Evidence policy and DecisionPolicy age/skew limits.
-Invalid timing input has no partial/raw fallback in a blocked record: its public
+Invalid market/timing input has no partial/raw fallback in a blocked record: its public
 projection is `null`.
 
 ## Product goal and action language
@@ -127,30 +138,35 @@ Private state begins with the `Underwriting Case` and includes its evidence inte
 
 The plain Node workbench has no MCP authentication and does not contact
 Robinhood. The Codex runtime binds
-`collectRobinhoodRead({selectedAccountNumber, capturedAt, client})` to an
-authenticated client. The injected client exposes exactly `getAccounts`,
-`getPortfolio`, `getEquityPositions`, and `getEquityQuotes`, corresponding to the
-MCP read allowlist `get_accounts`, `get_portfolio`, `get_equity_positions`, and
-`get_equity_quotes`. Their calls are fixed to `getAccounts()`,
+`collectRobinhoodRead({selectedAccountNumber, targetSymbol, capturedAt, client})`
+to an authenticated client. The injected client exposes exactly `getAccounts`,
+`getPortfolio`, `getEquityPositions`, `getEquityQuotes`, and
+`getEarningsResults`, corresponding to the MCP read allowlist `get_accounts`,
+`get_portfolio`, `get_equity_positions`, `get_equity_quotes`, and
+`get_earnings_results`. Their calls are fixed to `getAccounts()`,
 `getPortfolio({accountNumber})`,
 `getEquityPositions({accountNumber, cursor?})`, and
-`getEquityQuotes({symbols})`. The collector explicitly selects one account, follows every
-position page, obtains quotes for all held equity symbols, and returns only
-allow-listed normalized projections. MCP transport responses are not the
-collector bundle and never enter the Node CLI. No order, cancel, review-order,
-watchlist mutation, retry, cache, or fallback call is allowed in collection.
+`getEquityQuotes({symbols})`, plus `getEarningsResults({symbol: targetSymbol})`.
+The collector explicitly selects one account, follows every position page,
+obtains one de-duplicated quote set for `targetSymbol ∪ heldSymbols` in batches
+of at most 20, obtains earnings for the target only, and returns only allow-listed
+normalized projections. MCP transport responses are not the collector bundle
+and never enter the Node CLI. No order, cancel, review-order, watchlist mutation,
+retry, cache, fallback, or second market collector is allowed.
 
 The stdin bundle is exact and versioned:
 
 ```text
-RobinhoodReadV1 {
-  schemaVersion,
+RobinhoodReadV2 {
+  schemaVersion: 2,
   capturedAt,
+  targetSymbol,
   selectedAccountNumber,
   accounts,
   portfolio: { accountNumber, data },
   positionPages,
-  quoteBatches
+  quoteBatches,
+  earnings: { symbol, data: { not_found, results } }
 }
 ```
 
@@ -159,8 +175,13 @@ memory. It is never written to a temporary file, case file, ledger, cache,
 stdout, stderr, or public artifact. The ledger contains only the emitted
 `DecisionRecordV2`.
 Account number/`selectedAccountNumber`, NLV/`total_value`, `quantity`,
-`markPrice`, `average_buy_price`, pagination `cursor`, and raw payload canaries
-must never appear in stdout, stderr, or the ledger.
+raw quote envelopes, bid/ask, non-selected trade/close fields, raw earnings
+estimates/results,
+`average_buy_price`, pagination `cursor`, and raw payload canaries must never
+appear in stdout, stderr, or the ledger. The sanitized record may contain only
+the canonical derived `evaluatedPrice` value/time/source, bounded timing
+status/reasons, opaque
+evidence references, and portfolio weights required by `DecisionRecordV2`.
 
 The canonical position denominator is `netLiquidationValue` (NLV), captured at the same account as-of time as the holding facts. Position weights, hard limits, `effectiveLimit`, `positionSizing.targetPosition`, and `positionSizing.additionalCapacity` are all expressed against NLV; personal, industry, and portfolio strategies remain private policy inputs and are never inferred from the public ranking.
 
@@ -185,7 +206,13 @@ Evidence {
 }
 ```
 
-`reference` must identify a retrievable source without embedding credentials. A gate may be `PASS` or `FAIL` only when it names one or more applicable evidence IDs; otherwise the result is `Evaluation Blocked`, never an ungrounded status. Timing claims are stricter: the pass, fail, and event-risk claims named by the timing policy must be directly `OBSERVED` source-backed Evidence and cannot reuse a long-term gate claim key.
+`reference` must identify a retrievable source without embedding credentials. A
+gate may be `PASS` or `FAIL` only when it names one or more applicable evidence
+IDs; otherwise the result is `Evaluation Blocked`, never an ungrounded status.
+Timing is stricter: the machine price, session, and earnings-schedule Evidence
+must be directly `OBSERVED` from the fixed Robinhood source kinds. The timing
+policy contains thresholds only; it names no caller-authored pass, fail, or event
+claim.
 
 `sourceQuality` describes the source; `derivation` describes whether the observation is directly observed or inferred. These dimensions are independent and must not be collapsed into one quality value.
 
@@ -250,27 +277,36 @@ reaches the record or external ledger.
 
 ### TimingAssessment
 
-`deriveTimingAssessment` accepts only the exact raw policy fields: current-price,
-pass/fail/event-risk keys, freshness limits, and event-risk reason code. For the
-symbol-case adapter, `currentPriceFactKey` is fixed to `CURRENT_PRICE`; aliases,
-other fact keys, defaults, and caller-supplied `requirePassSupport` are rejected.
-Pass support is always required. The policy is stored as a content-addressed
-`TIMING_POLICY` snapshot. The builder then resolves Evidence and derives the only
-allowed current quote from exactly one fresh, non-conflicting `OBSERVED` item in
-the reserved `key=price`, `claimKey=PRICE`, `factKey=CURRENT_PRICE` namespace for
-the same symbol in USD. Caller-supplied status, price, price evidence ID, reason
-codes, or timing artifact fields are rejected. Other target or historical price
-Evidence is never eligible for `evaluatedPrice`.
+For the symbol-case adapter, the caller's raw timing policy accepts exactly
+`schemaVersion=2`, `maxQuoteAgeMs`, `maxFutureSkewMs`, and
+`earningsRiskWindowDays`. `deriveRobinhoodInputs` owns every machine claim/fact
+key and creates exactly the target quote candidate, `MARKET_SESSION`, required
+`earnings-schedule-known`, and optional `next-earnings-at` Evidence. Timing
+computes the event window from those facts; the adapter does not pre-label risk.
+Caller aliases, caller machine Evidence,
+defaults, statuses, prices, price evidence IDs, reason codes, or timing artifact
+fields are rejected. Pass support is always required. The policy is stored as a
+content-addressed `TIMING_POLICY` snapshot. The builder then resolves Evidence
+and derives the only allowed current quote from exactly one fresh,
+non-conflicting `OBSERVED` item in the reserved `key=price`,
+`claimKey=MARKET_PRICE`,
+`factKey=CURRENT_PRICE` namespace for the same symbol in USD. Other target or
+historical price Evidence is never eligible for `evaluatedPrice`.
 
 The resulting content-addressed artifact binds the symbol, Evidence snapshot and
 digest, price evidence ID, status, as-of, evidence IDs, and bounded reason codes.
 `PASS`, `FAIL`, `EVENT_RISK`, and `BLOCKED` are derived from fresh support or
-challenge stances. A missing/stale/conflicting quote or missing required support
-is `BLOCKED`; a challenge (or explicit fail support) is `FAIL`; event-risk
-support is `EVENT_RISK`. Timing never changes the long-term gate. The projector
-re-resolves policy, Evidence, and artifact payloads and returns the canonical
-evaluated price plus assessment only when all identities and freshness checks
-still match.
+challenge stances. Timing, not the collector/projector, is the authority for
+freshness and session eligibility. Only a fresh regular-hours trade is eligible; pre-market,
+after-hours, weekend, official-close-only, missing, stale, future, conflicting,
+or inactive/untraded quote state is `BLOCKED`. A verified or tentative upcoming
+earnings report inside the inclusive policy window is `EVENT_RISK`; unresolved
+or empty earnings is `BLOCKED`; non-empty resolved history without an upcoming
+event supplies schedule-known support without a next-event fact. A challenge is
+`FAIL`. Timing never
+changes the long-term gate. The projector re-resolves policy, Evidence, and
+artifact payloads and returns the canonical evaluated price plus assessment only
+when all identities and freshness checks still match.
 
 ### PortfolioCapacitySnapshot
 
@@ -430,19 +466,21 @@ pair before a request. For one invocation, the CLI:
 
 1. validates argv and the optional ledger path before reading stdin or making a
    request, then reads the private case file and one normalized
-   `RobinhoodReadV1` collector bundle from stdin;
+   `RobinhoodReadV2` collector bundle implicitly from stdin;
 2. reads each public file once from one base URL using `GET` without a body,
    preserving the `stat.json` response text byte-for-byte;
 3. verifies the manifest's raw-artifact hash/bytes/symbol counts, then selects
-   the canonicalized symbol row and builds one secondary public price observation;
-4. normalizes the complete Robinhood read facts with the verified public
-   classifications, without accepting caller-supplied capacity or action fields;
+   the canonicalized symbol row for research and classification only;
+4. projects the complete Robinhood read into the sole current quote,
+   regular-session, earnings, and portfolio facts for the same target, without
+   accepting caller-supplied machine timing, capacity, or action fields;
 5. combines only the public research inputs with the explicit private sections;
 6. evaluates the fixed domain stages and emits one sanitized `DecisionRecordV2`;
 7. when requested, appends that exact stdout record once to the external ledger.
 
 The CLI does not refresh an account, place an order, call a broker, write public
-data, or mutate a UI. It never falls back to a private quote, another symbol,
+data, or mutate a UI. It never falls back to an official close, Yahoo price,
+another symbol,
 an unqualified ranking, or an inferred personal policy. A late, partial, stale,
 or inconsistent semantic input is `Evaluation Blocked`.
 
@@ -467,11 +505,13 @@ Migration is a clean cutover to the target contracts; no compatibility layer, al
 2. Replace the public producer with `MarketDataSnapshot` and `FundamentalResearch`, remove timing from the fundamental catalog, and make the quality manifest the required research gate.
 3. Introduce private structured underwriting and evidence-backed valuation/entry/invalidation, followed by the downstream `TimingAssessment`.
 4. Replace position math with the NLV-denominated `PortfolioCapacitySnapshot`;
-   accept only the exact normalized `RobinhoodReadV1` collector bundle on stdin,
+   accept only the exact normalized `RobinhoodReadV2` collector bundle on stdin,
    keep capacity policy in the private case, and do not add an account-provider
    client or MCP authentication to Node.
-5. Replace decision output with `DecisionRecordV2` and private-ledger persistence, then remove the old decision field names and ungrounded status paths.
-6. After the v2 cutover, rewrite or delete the old `docs/decision-core.md` v1 description so it is no longer an authoritative contract; do not leave two decision models in force.
+5. Deepen that same V2 collector and projector with target quotes and earnings;
+   remove Yahoo current-price authority, caller timing claims, V1, and the
+   redundant `--robinhood` argument rather than adding another market adapter.
+6. Replace decision output with `DecisionRecordV2` and private-ledger persistence, then remove the old decision field names and ungrounded status paths.
 
 The following old mechanisms are deleted as each step lands:
 
@@ -483,6 +523,7 @@ The following old mechanisms are deleted as each step lands:
 - Any direct `PASS`/`FAIL` emission that has no evidence references and no blocker outcome for unknown data.
 - The `recommendedPosition` field; v2 uses `targetPosition`, with `additionalCapacity` carrying the amount that may be added.
 - Yahoo's single-point target price as an authoritative valuation; source observations may remain evidence, but the decision requires an evidence-backed range.
-- The v1 `docs/decision-core.md` authority after v2 is live; rewrite or remove it as part of the cutover rather than preserving a stale specification.
+- Yahoo `Close` as current-price authority, caller-authored timing pass/event
+  claims, `RobinhoodReadV1`, and the `--robinhood` compatibility flag.
 
 No compatibility layer is added for these deletions. Consumers migrate to the final names and boundaries in order, and stale paths are removed rather than retained behind aliases.

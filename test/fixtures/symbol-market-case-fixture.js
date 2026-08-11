@@ -1,6 +1,6 @@
 import { createSnapshot } from '../../src/domain/contentAddressing.js'
 import { AS_OF, NOW, rawCase } from './workbench-fixture.js'
-import { robinhoodRead } from './robinhood-portfolio-fixture.js'
+import { robinhoodRead } from './robinhood-read-fixture.js'
 
 const STAT_ARTIFACT = '{"AAA":{"sector":"Technology","industry":"Software","Close":95,"name":"AAA","Market Cap":100,"P/E":20,"ROE":0.2,"Debt/Eq":0.2,"FCFF/EV":0.1,"asOf":"2026-08-10T08:00:00.000Z","observedAt":"2026-08-10T08:00:00.000Z","currency":"USD"},"BBB":{"sector":"Technology","industry":"Software","Close":95,"name":"BBB","Market Cap":100,"P/E":20,"ROE":0.1,"Debt/Eq":0.2,"FCFF/EV":0.1,"asOf":"2026-08-10T08:00:00.000Z","observedAt":"2026-08-10T08:00:00.000Z","currency":"USD"}}'
 const STAT_ARTIFACT_CONTRACT = Object.freeze({
@@ -83,15 +83,20 @@ const STAT_ARTIFACT_VECTORS = Object.freeze({
 export function symbolMarketCase(overrides = {}) {
   const raw = rawCase()
   const sourcePayload = structuredClone(raw.sourceSnapshots[0].payload)
-  sourcePayload.facts = sourcePayload.facts.filter(fact => fact.factKey !== 'CURRENT_PRICE')
   const source = createSnapshot('source', sourcePayload)
   const evidence = structuredClone(raw.evidence)
   evidence.drafts = evidence.drafts
-    .filter(draft => draft.factKey !== 'CURRENT_PRICE')
+    .filter(draft => ![
+      'price', 'market-session', 'earnings-schedule-known', 'next-earnings-at',
+    ]
+      .includes(draft.key))
     .map(draft => draft.sourceRef === raw.sourceSnapshots[0].id
       ? { ...draft, sourceRef: source.ref.id }
       : draft)
+  delete evidence.sourcePolicy.kinds.ROBINHOOD_EQUITY_QUOTE
+  delete evidence.sourcePolicy.kinds.ROBINHOOD_EARNINGS_CALENDAR
 
+  const read = overrides.robinhoodRead ?? robinhoodRead()
   return {
     symbol: 'AAA',
     evaluatedAt: NOW,
@@ -100,7 +105,7 @@ export function symbolMarketCase(overrides = {}) {
       ...structuredClone(raw.research.qualityManifest),
       statArtifact: { ...STAT_ARTIFACT_CONTRACT },
     },
-    robinhoodRead: robinhoodRead(),
+    robinhoodRead: read,
     privateCase: {
       schemaVersion: 1,
       researchPolicy: structuredClone(raw.research.policy),
@@ -110,7 +115,7 @@ export function symbolMarketCase(overrides = {}) {
       timing: structuredClone(raw.timing),
       capacityPolicy: {
         policy: structuredClone(raw.portfolio.policy),
-        liquidity: structuredClone(raw.portfolio.liquidity),
+        liquidity: { ...structuredClone(raw.portfolio.liquidity), asOf: read.capturedAt },
         freshnessPolicy: structuredClone(raw.portfolio.freshnessPolicy),
       },
       decisionPolicy: structuredClone(raw.decisionPolicy),
