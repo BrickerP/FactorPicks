@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -19,6 +20,11 @@ import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { NOW, symbolMarketCase } from './fixtures/symbol-market-case-fixture.js'
+import {
+  ACCOUNT_NUMBER,
+  addRead,
+  robinhoodRead as robinhoodReadFixture,
+} from './fixtures/robinhood-portfolio-fixture.js'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SCRIPT = join(ROOT, 'scripts/evaluate-workbench.js')
@@ -91,6 +97,23 @@ function bindStatArtifact(input, statArtifact) {
   }
 }
 
+function privateCaseForCli(input) {
+  return structuredClone(input.privateCase)
+}
+
+function writePrivateCase(directory, input, value = privateCaseForCli(input)) {
+  const path = join(directory, 'private-case.json')
+  writeFileSync(path, JSON.stringify(value))
+  return path
+}
+
+function robinhoodRead(overrides = {}) {
+  const base = robinhoodReadFixture()
+  return { ...base, ...structuredClone(overrides) }
+}
+
+const PRIVATE_OUTPUT = /account_number|selectedAccountNumber|netLiquidationValue|\bNLV\b|total_value|quantity|markPrice|average_buy_price|cursor|RH-PRIVATE-4321|account-number-do-not-echo/i
+
 function defaultMarketEnvironment(directory, localOrigin) {
   const preloadPath = join(directory, 'redirect-default-market.mjs')
   writeFileSync(preloadPath, `
@@ -122,13 +145,14 @@ test('workbench CLI preserves raw stat bytes and evaluates against two public ma
   bindStatArtifact(input, `\n${input.statArtifact}\n`)
   const market = await startMarketServer(input)
   try {
-    writeFileSync(inputPath, JSON.stringify(input.privateCase))
+    writeFileSync(inputPath, JSON.stringify(privateCaseForCli(input)))
     const result = await run([
       '--symbol', 'aaa',
       '--case', inputPath,
+      '--robinhood', '-',
       '--market-url', market.baseUrl.replace(/\/$/, ''),
       '--evaluated-at', NOW,
-    ])
+    ], JSON.stringify(robinhoodRead()))
 
     assert.equal(result.status, 0, result.stderr)
     const decision = JSON.parse(result.stdout)
@@ -144,16 +168,42 @@ test('workbench CLI preserves raw stat bytes and evaluates against two public ma
   }
 })
 
-test('workbench CLI uses the canonical default market URL and reads a case from stdin', async () => {
+test('workbench CLI derives ADD from a later Robinhood position page without exposing provider facts', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-add-'))
+  const input = symbolMarketCase()
+  const inputPath = writePrivateCase(directory, input)
+  const market = await startMarketServer(input)
+  const providerRead = addRead()
+  providerRead.positionPages[1].positions[0].average_buy_price = 'provider-cost-do-not-echo'
+  try {
+    const result = await run([
+      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+      '--market-url', market.baseUrl, '--evaluated-at', NOW,
+    ], JSON.stringify(providerRead))
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(JSON.parse(result.stdout).buyAction, 'ADD')
+    assert.equal(result.stderr, '')
+    assert.doesNotMatch(result.stdout, PRIVATE_OUTPUT)
+    assert.doesNotMatch(result.stdout, /provider-cost-do-not-echo/)
+  } finally {
+    await market.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('workbench CLI uses the canonical default market URL with file case and Robinhood stdin', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'factorpicks-default-market-'))
   const input = symbolMarketCase()
+  const inputPath = writePrivateCase(directory, input)
   const market = await startMarketServer(input)
   try {
     const result = await run([
       '--symbol', 'AAA',
-      '--case', '-',
+      '--case', inputPath,
+      '--robinhood', '-',
       '--evaluated-at', NOW,
-    ], JSON.stringify(input.privateCase), {
+    ], JSON.stringify(robinhoodRead()), {
       env: defaultMarketEnvironment(directory, new URL(market.baseUrl).origin),
     })
 
@@ -174,23 +224,61 @@ test('semantic market-data problems emit a blocked DecisionRecord with exit zero
   const ledger = join(directory, 'blocked.jsonl')
   const input = symbolMarketCase()
   input.statArtifact = '{}'
+  const inputPath = writePrivateCase(directory, input)
   const market = await startMarketServer(input)
   try {
     const result = await run([
       '--symbol', 'AAA',
-      '--case', '-',
+      '--case', inputPath,
+      '--robinhood', '-',
       '--market-url', market.baseUrl,
       '--evaluated-at', NOW,
       '--ledger', ledger,
-    ], JSON.stringify(input.privateCase))
+    ], JSON.stringify(robinhoodRead()))
 
     assert.equal(result.status, 0, result.stderr)
     const decision = JSON.parse(result.stdout)
     assert.equal(decision.dataStatus, 'EVALUATION_BLOCKED')
     assert.equal(decision.buyAction, 'NO_ACTION')
     assert.equal(readFileSync(ledger, 'utf8'), result.stdout)
+    assert.doesNotMatch(result.stdout, PRIVATE_OUTPUT)
     assert.doesNotMatch(result.stdout,
-      /netLiquidationValue|quantity|accountId|condition|response|predicate|sourceSnapshots/)
+      /accountId|condition|response|predicate|sourceSnapshots/)
+  } finally {
+    await market.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('semantic collector-bundle problems emit only a blocked DecisionRecord and never persist collected input', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-blocked-'))
+  const ledger = join(directory, 'blocked.jsonl')
+  const input = symbolMarketCase()
+  const inputPath = writePrivateCase(directory, input)
+  const privateCaseBefore = readFileSync(inputPath, 'utf8')
+  const providerRead = robinhoodRead()
+  providerRead.payloadCanary = 'collected-payload-canary'
+  providerRead.portfolio.data.total_value = '123456.78'
+  const market = await startMarketServer(input)
+  try {
+    const result = await run([
+      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+      '--market-url', market.baseUrl, '--evaluated-at', NOW, '--ledger', ledger,
+    ], JSON.stringify(providerRead))
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, '')
+    const decision = JSON.parse(result.stdout)
+    assert.equal(decision.dataStatus, 'EVALUATION_BLOCKED')
+    assert.equal(decision.buyAction, 'NO_ACTION')
+    assert.ok(decision.blockerCodes.includes('INVALID_PORTFOLIO_CAPACITY'))
+    assert.equal(readFileSync(ledger, 'utf8'), result.stdout)
+    assert.equal(readFileSync(inputPath, 'utf8'), privateCaseBefore)
+    assert.deepEqual(readdirSync(directory).sort(), ['blocked.jsonl', 'private-case.json'])
+    for (const output of [result.stdout, result.stderr, readFileSync(ledger, 'utf8')]) {
+      assert.doesNotMatch(output, PRIVATE_OUTPUT)
+      assert.doesNotMatch(output, /collected-payload-canary|123456\.78/)
+    }
   } finally {
     await market.close()
     rmSync(directory, { recursive: true, force: true })
@@ -198,15 +286,34 @@ test('semantic market-data problems emit a blocked DecisionRecord with exit zero
 })
 
 test('HTTP failures and malicious public JSON are generic and never expose private data', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-http-private-'))
   const input = symbolMarketCase()
-  input.privateCase.portfolio.portfolio.sourceRef = 'private-case-do-not-echo'
+  const inputPath = writePrivateCase(directory, input)
+  const providerInput = JSON.stringify(robinhoodRead({
+    selectedAccountNumber: 'private-provider-do-not-echo',
+    accounts: [{
+      account_number: 'private-provider-do-not-echo',
+      agentic_allowed: true,
+      state: 'active',
+      type: 'cash',
+      deactivated: false,
+      permanently_deactivated: false,
+    }],
+    positionPages: [{
+      accountNumber: 'private-provider-do-not-echo',
+      cursor: null,
+      next: null,
+      positions: [],
+    }],
+  }))
   const unavailable = await startMarketServer(input, {
     'stat.json': { status: 503, statusMessage: 'remote-do-not-echo' },
   })
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', '-', '--market-url', unavailable.baseUrl,
-    ], JSON.stringify(input.privateCase))
+      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+      '--market-url', unavailable.baseUrl,
+    ], providerInput)
     assert.equal(result.status, 1)
     assert.match(result.stderr, /public market data/i)
     assert.doesNotMatch(result.stderr, /private-case-do-not-echo|remote-do-not-echo/)
@@ -219,21 +326,27 @@ test('HTTP failures and malicious public JSON are generic and never expose priva
   })
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', '-', '--market-url', malicious.baseUrl,
-    ], JSON.stringify(input.privateCase))
+      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+      '--market-url', malicious.baseUrl,
+    ], providerInput)
     assert.equal(result.status, 1)
     assert.match(result.stderr, /public market data/i)
     assert.doesNotMatch(result.stderr, /private-case-do-not-echo|malicious-do-not-echo/)
   } finally {
     await malicious.close()
+    rmSync(directory, { recursive: true, force: true })
   }
 })
 
 test('unknown, missing, malformed, and invalid top-level inputs exit one without echoing data', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-invalid-input-'))
   const input = symbolMarketCase()
+  const inputPath = writePrivateCase(directory, input)
+  const providerInput = JSON.stringify(robinhoodRead())
   const unknown = await run([
-    '--symbol', 'AAA', '--case', '-', '--private-secret', 'argv-do-not-echo',
-  ], JSON.stringify(input.privateCase))
+    '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+    '--private-secret', 'argv-do-not-echo',
+  ], providerInput)
   assert.equal(unknown.status, 1)
   assert.match(unknown.stderr, /Usage:/)
   assert.doesNotMatch(unknown.stderr, /argv-do-not-echo/)
@@ -242,29 +355,46 @@ test('unknown, missing, malformed, and invalid top-level inputs exit one without
   assert.equal(missing.status, 1)
   assert.match(missing.stderr, /Usage:/)
 
-  const malformed = await run(['--symbol', 'AAA', '--case', '-'],
-    '{"privateSecret":"json-do-not-echo"')
+  const malformedPath = join(directory, 'malformed-case.json')
+  writeFileSync(malformedPath, '{"privateSecret":"json-do-not-echo"')
+  const malformed = await run([
+    '--symbol', 'AAA', '--case', malformedPath, '--robinhood', '-',
+  ], providerInput)
   assert.equal(malformed.status, 1)
   assert.match(malformed.stderr, /valid JSON/i)
   assert.doesNotMatch(malformed.stderr, /json-do-not-echo/)
 
+  const malformedRobinhood = await run([
+    '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+  ], '{"providerSecret":"provider-json-do-not-echo"')
+  assert.equal(malformedRobinhood.status, 1)
+  assert.equal(malformedRobinhood.stderr, 'Unable to load collected portfolio input\n')
+  assert.doesNotMatch(malformedRobinhood.stderr, /provider-json-do-not-echo/)
+
   const invalidUrl = await run([
-    '--symbol', 'AAA', '--case', '-', '--market-url', 'file:///url-do-not-echo',
-  ], JSON.stringify(input.privateCase))
+    '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+    '--market-url', 'file:///url-do-not-echo',
+  ], providerInput)
   assert.equal(invalidUrl.status, 1)
   assert.match(invalidUrl.stderr, /public market data/i)
   assert.doesNotMatch(invalidUrl.stderr, /url-do-not-echo/)
 
   const market = await startMarketServer(input)
   try {
+    const invalidPath = writePrivateCase(directory, input, {
+      ...privateCaseForCli(input),
+      privateSecret: 'top-level-do-not-echo',
+    })
     const invalid = await run([
-      '--symbol', 'AAA', '--case', '-', '--market-url', market.baseUrl,
-    ], JSON.stringify({ ...input.privateCase, privateSecret: 'top-level-do-not-echo' }))
+      '--symbol', 'AAA', '--case', invalidPath, '--robinhood', '-',
+      '--market-url', market.baseUrl,
+    ], providerInput)
     assert.equal(invalid.status, 1)
     assert.match(invalid.stderr, /evaluate symbol case/i)
     assert.doesNotMatch(invalid.stderr, /top-level-do-not-echo/)
   } finally {
     await market.close()
+    rmSync(directory, { recursive: true, force: true })
   }
 })
 
@@ -272,24 +402,26 @@ test('ledger appends exactly one private-safe 0600 line identical to stdout', as
   const directory = mkdtempSync(join(tmpdir(), 'factorpicks-symbol-ledger-'))
   const ledger = join(directory, 'decisions.jsonl')
   const input = symbolMarketCase()
+  const inputPath = writePrivateCase(directory, input)
   const market = await startMarketServer(input)
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', '-', '--market-url', market.baseUrl,
+      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-', '--market-url', market.baseUrl,
       '--evaluated-at', NOW, '--ledger', ledger,
-    ], JSON.stringify(input.privateCase))
+    ], JSON.stringify(robinhoodRead()))
 
     assert.equal(result.status, 0, result.stderr)
     assert.equal(readFileSync(ledger, 'utf8'), result.stdout)
     assert.equal(result.stdout.trim().split('\n').length, 1)
     assert.equal(statSync(ledger).mode & 0o077, 0)
+    assert.doesNotMatch(result.stdout, PRIVATE_OUTPUT)
     assert.doesNotMatch(result.stdout,
-      /netLiquidationValue|quantity|accountId|condition|response|predicate|sourceSnapshots/)
+      /accountId|condition|response|predicate|sourceSnapshots/)
 
     const second = await run([
-      '--symbol', 'AAA', '--case', '-', '--market-url', market.baseUrl,
+      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-', '--market-url', market.baseUrl,
       '--evaluated-at', NOW, '--ledger', ledger,
-    ], JSON.stringify(input.privateCase))
+    ], JSON.stringify(robinhoodRead()))
     assert.equal(second.status, 0, second.stderr)
     assert.equal(readFileSync(ledger, 'utf8'), result.stdout + second.stdout)
     assert.equal(readFileSync(ledger, 'utf8').trim().split('\n').length, 2)
@@ -311,6 +443,7 @@ test('ledger rejects a validated parent replaced by a symlink before the fd writ
   mkdirSync(attackerParent)
   writeFileSync(attackerLedger, sentinel, { mode: 0o600 })
   const input = symbolMarketCase()
+  const inputPath = writePrivateCase(directory, input)
   let swapped = false
   const market = await startMarketServer(input, {}, () => {
     if (swapped) return
@@ -320,9 +453,9 @@ test('ledger rejects a validated parent replaced by a symlink before the fd writ
   })
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', '-', '--market-url', market.baseUrl,
+      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-', '--market-url', market.baseUrl,
       '--evaluated-at', NOW, '--ledger', ledger,
-    ], JSON.stringify(input.privateCase))
+    ], JSON.stringify(robinhoodRead()))
 
     assert.equal(result.status, 1)
     assert.match(result.stderr, /Ledger/)
@@ -341,36 +474,64 @@ test('ledger rejects repository, permissive, symlinked, and device paths before 
   const parentLink = join(directory, 'parent-link')
   const target = join(directory, 'target.jsonl')
   const targetLink = join(directory, 'target-link')
+  const inputPath = writePrivateCase(directory, input)
   const market = await startMarketServer(input)
   const args = path => [
-    '--symbol', 'AAA', '--case', '-', '--market-url', market.baseUrl, '--ledger', path,
+    '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+    '--market-url', market.baseUrl, '--ledger', path,
   ]
   try {
     writeFileSync(ledger, '')
     chmodSync(ledger, 0o644)
-    const permissive = await run(args(ledger), JSON.stringify(input.privateCase))
+    const permissive = await run(args(ledger), JSON.stringify(robinhoodRead()))
     assert.equal(permissive.status, 1)
 
     writeFileSync(target, '', { mode: 0o600 })
     symlinkSync(target, targetLink)
-    const linkedTarget = await run(args(targetLink), JSON.stringify(input.privateCase))
+    const linkedTarget = await run(args(targetLink), JSON.stringify(robinhoodRead()))
     assert.equal(linkedTarget.status, 1)
 
     mkdirSync(parent)
     symlinkSync(parent, parentLink)
     const linked = await run(args(join(parentLink, 'decisions.jsonl')),
-      JSON.stringify(input.privateCase))
+      JSON.stringify(robinhoodRead()))
     assert.equal(linked.status, 1)
 
     const inside = await run(args(join(ROOT, 'private-do-not-create.jsonl')),
-      JSON.stringify(input.privateCase))
+      JSON.stringify(robinhoodRead()))
     assert.equal(inside.status, 1)
 
-    const device = await run(args('/dev/null'), JSON.stringify(input.privateCase))
+    const device = await run(args('/dev/null'), JSON.stringify(robinhoodRead()))
     assert.equal(device.status, 1)
     assert.equal(market.requests.length, 0)
   } finally {
     await market.close()
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('the collected portfolio bundle is required on stdin while the private case must be a file', async () => {
+  const input = symbolMarketCase()
+  const canary = 'provider-payload-do-not-echo'
+
+  const missing = await run([
+    '--symbol', 'AAA', '--case', '/private-case-do-not-read.json',
+  ], canary)
+  assert.equal(missing.status, 1)
+  assert.match(missing.stderr, /Usage:/)
+  assert.doesNotMatch(missing.stdout + missing.stderr, new RegExp(canary))
+
+  const caseStdin = await run([
+    '--symbol', 'AAA', '--case', '-', '--robinhood', '-',
+  ], canary)
+  assert.equal(caseStdin.status, 1)
+  assert.match(caseStdin.stderr, /Usage:/)
+  assert.doesNotMatch(caseStdin.stdout + caseStdin.stderr, new RegExp(canary))
+
+  const robinhoodPath = await run([
+    '--symbol', 'AAA', '--case', '/private-case-do-not-read.json',
+    '--robinhood', '/provider-payload-do-not-read.json',
+  ], JSON.stringify(input.privateCase))
+  assert.equal(robinhoodPath.status, 1)
+  assert.match(robinhoodPath.stderr, /Usage:/)
 })

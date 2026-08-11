@@ -10,7 +10,8 @@ import { evaluateSymbolCase } from '../src/domain/evaluateSymbolCase.js'
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const DEFAULT_MARKET_URL = 'https://brickerp.github.io/FactorPicks/'
-const USAGE = 'Usage: npm run workbench -- --symbol SYMBOL --case private-case.json|- [--market-url base] [--evaluated-at ISO] [--ledger external-path]'
+const USAGE = 'Usage: npm run workbench -- --symbol SYMBOL --case private-case.json --robinhood - [--market-url base] [--evaluated-at ISO] [--ledger external-path]'
+const COLLECTED_PORTFOLIO_ERROR = 'Unable to load collected portfolio input'
 
 function assertOutsideRepository(path) {
   const repositoryRelativePath = relative(REPOSITORY_ROOT, path)
@@ -182,6 +183,7 @@ function parseArguments(args) {
   const names = new Set([
     '--symbol',
     '--case',
+    '--robinhood',
     '--market-url',
     '--evaluated-at',
     '--ledger',
@@ -194,7 +196,10 @@ function parseArguments(args) {
     options.set(argument, value)
     index += 1
   }
-  if (!options.has('--symbol') || !options.has('--case')) throw new Error(USAGE)
+  if (!options.has('--symbol') || !options.has('--case') ||
+      options.get('--case') === '-' || options.get('--robinhood') !== '-') {
+    throw new Error(USAGE)
+  }
   return {
     symbol: options.get('--symbol'),
     casePath: options.get('--case'),
@@ -205,18 +210,13 @@ function parseArguments(args) {
 }
 
 async function readPrivateCase(casePath) {
-  let json = ''
-  if (casePath !== '-') {
-    try {
-      json = await readFile(casePath, 'utf8')
-    } catch {
-      const error = new Error('Unable to read private case')
-      error.code = 'PRIVATE_CASE_READ_ERROR'
-      throw error
-    }
-  } else {
-    process.stdin.setEncoding('utf8')
-    for await (const chunk of process.stdin) json += chunk
+  let json
+  try {
+    json = await readFile(casePath, 'utf8')
+  } catch {
+    const error = new Error('Unable to read private case')
+    error.code = 'PRIVATE_CASE_READ_ERROR'
+    throw error
   }
   let privateCase
   try {
@@ -232,6 +232,33 @@ async function readPrivateCase(casePath) {
     throw error
   }
   return privateCase
+}
+
+async function readCollectedPortfolio() {
+  let json = ''
+  try {
+    process.stdin.setEncoding('utf8')
+    for await (const chunk of process.stdin) json += chunk
+  } catch {
+    const error = new Error(COLLECTED_PORTFOLIO_ERROR)
+    error.code = 'COLLECTED_PORTFOLIO_READ_ERROR'
+    throw error
+  }
+  let robinhoodRead
+  try {
+    robinhoodRead = JSON.parse(json)
+  } catch {
+    const error = new TypeError(COLLECTED_PORTFOLIO_ERROR)
+    error.code = 'INVALID_COLLECTED_PORTFOLIO_JSON'
+    throw error
+  }
+  if (robinhoodRead === null || Array.isArray(robinhoodRead) ||
+      typeof robinhoodRead !== 'object') {
+    const error = new TypeError(COLLECTED_PORTFOLIO_ERROR)
+    error.code = 'INVALID_COLLECTED_PORTFOLIO_JSON'
+    throw error
+  }
+  return robinhoodRead
 }
 
 function publicUrl(base, file) {
@@ -311,6 +338,7 @@ async function main() {
     ? undefined
     : await resolveLedgerPath(ledgerPath)
   const privateCase = await readPrivateCase(casePath)
+  const robinhoodRead = await readCollectedPortfolio()
   const { statArtifact, qualityManifest } = await readPublicMarket(marketUrl)
   const decision = evaluateSymbolCase({
     symbol,
@@ -318,6 +346,7 @@ async function main() {
     statArtifact,
     qualityManifest,
     privateCase,
+    robinhoodRead,
   })
   const serialized = JSON.stringify(decision)
   if (ledgerPlan !== undefined) {
@@ -328,7 +357,9 @@ async function main() {
 
 function safeErrorMessage(error) {
   if (error?.code === 'INVALID_PRIVATE_CASE_JSON') return error.message
+  if (error?.code === 'INVALID_COLLECTED_PORTFOLIO_JSON') return COLLECTED_PORTFOLIO_ERROR
   if (error?.code === 'PRIVATE_CASE_READ_ERROR') return 'Unable to read private case'
+  if (error?.code === 'COLLECTED_PORTFOLIO_READ_ERROR') return COLLECTED_PORTFOLIO_ERROR
   if (error?.code === 'PUBLIC_MARKET_DATA_ERROR') return 'Unable to load public market data'
   if (error?.message === USAGE) return USAGE
   if (error?.message?.startsWith('Ledger')) return error.message
