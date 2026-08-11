@@ -2,8 +2,11 @@ import { createHash } from 'node:crypto'
 
 import { createSnapshot } from './contentAddressing.js'
 import { evaluateWorkbench } from './workbench.js'
+import { deriveRobinhoodPortfolioInput } from './robinhoodPortfolio.js'
 
-const INPUT_KEYS = ['symbol', 'evaluatedAt', 'statArtifact', 'qualityManifest', 'privateCase']
+const INPUT_KEYS = [
+  'symbol', 'evaluatedAt', 'statArtifact', 'qualityManifest', 'robinhoodRead', 'privateCase',
+]
 const PRIVATE_CASE_KEYS = [
   'schemaVersion',
   'researchPolicy',
@@ -11,7 +14,7 @@ const PRIVATE_CASE_KEYS = [
   'evidence',
   'underwriting',
   'timing',
-  'portfolio',
+  'capacityPolicy',
   'decisionPolicy',
 ]
 
@@ -154,6 +157,20 @@ export function evaluateSymbolCase(input) {
     ? [...privateCase.sourceSnapshots, yahooSource.resolved]
     : privateCase.sourceSnapshots
 
+  let portfolio = null
+  try {
+    portfolio = deriveRobinhoodPortfolioInput({
+      symbol,
+      evaluatedAt: source.evaluatedAt,
+      stat: parsed.stat,
+      robinhoodRead: source.robinhoodRead,
+      capacityPolicy: privateCase.capacityPolicy,
+    })
+  } catch (error) {
+    if (error?.code !== 'INVALID_ROBINHOOD_PORTFOLIO_INPUT') throw error
+    portfolio = null
+  }
+
   return evaluateWorkbench({
     schemaVersion: privateCase.schemaVersion,
     symbol,
@@ -167,7 +184,7 @@ export function evaluateSymbolCase(input) {
     evidence: canonicalEvidence,
     underwriting: privateCase.underwriting,
     timing: privateCase.timing,
-    portfolio: privateCase.portfolio,
+    portfolio,
     decisionPolicy: privateCase.decisionPolicy,
   })
 }
