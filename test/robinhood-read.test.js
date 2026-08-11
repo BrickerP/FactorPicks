@@ -2,10 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createSnapshot } from '../src/domain/contentAddressing.js'
+import { evaluateCandidateBatch } from '../src/domain/evaluateCandidateBatch.js'
 import { evaluateSymbolCase } from '../src/domain/evaluateSymbolCase.js'
 import {
   collectRobinhoodRead,
   deriveRobinhoodInputs,
+  validateRobinhoodReadV3,
 } from '../src/domain/robinhoodRead.js'
 import {
   ACCOUNT_NUMBER,
@@ -84,7 +86,39 @@ function assertDeepFrozen(value, seen = new WeakSet()) {
   for (const child of Object.values(value)) assertDeepFrozen(child, seen)
 }
 
-test('projects one V2 read into portfolio plus content-addressed market evidence inputs', () => {
+function privateCaseFor(symbol) {
+  const privateCase = structuredClone(symbolMarketCase().privateCase)
+  const priorSource = privateCase.sourceSnapshots[0]
+  const payload = structuredClone(priorSource.payload)
+  payload.symbol = symbol
+  payload.facts = payload.facts.map(fact => ({
+    ...fact,
+    scope: { ...fact.scope, symbol },
+  }))
+  const sourceSnapshot = createSnapshot('source', payload)
+  privateCase.sourceSnapshots = [sourceSnapshot.resolved]
+  privateCase.evidence.drafts = privateCase.evidence.drafts.map(item => ({
+    ...item,
+    ...(item.sourceRef === priorSource.id ? { sourceRef: sourceSnapshot.ref.id } : {}),
+    ...(item.scope ? { scope: { ...item.scope, symbol } } : {}),
+  }))
+  privateCase.underwriting.valuationDraft.symbol = symbol
+  return privateCase
+}
+
+function batchInput(read) {
+  const base = symbolMarketCase()
+  return {
+    schemaVersion: 1,
+    evaluatedAt: base.evaluatedAt,
+    statArtifact: base.statArtifact,
+    qualityManifest: base.qualityManifest,
+    robinhoodRead: read,
+    candidates: read.targetSymbols.map(symbol => ({ symbol, privateCase: privateCaseFor(symbol) })),
+  }
+}
+
+test('projects one V3 read into portfolio plus content-addressed market evidence inputs', () => {
   const output = derive()
 
   assert.equal(output.portfolio.portfolio.positions.length, 0)
@@ -116,7 +150,11 @@ test('projects the newest trade candidate and exposes its provider session', () 
   quote.quote.last_non_reg_trade_price = '55'
   quote.quote.venue_last_non_reg_trade_time = '2026-08-10T20:01:00.000Z'
   const extended = derive(robinhoodRead({
-    quoteBatches: [{ requestedSymbols: ['AAA'], results: [quote] }],
+    quoteBatches: [{
+      requestedSymbols: ['AAA'],
+      observedAt: '2026-08-10T20:01:00.000Z',
+      results: [quote],
+    }],
   }))
   assert.equal(draft(extended, 'price').value, 55)
   assert.equal(draft(extended, 'market-session').value, 'EXTENDED')
@@ -165,7 +203,11 @@ test('preserves stale, future, and extended candidates for the sole timing autho
   ]) {
     const quote = robinhoodQuoteResult('AAA', '95', asOf)
     const output = derive(robinhoodRead({
-      quoteBatches: [{ requestedSymbols: ['AAA'], results: [quote] }],
+      quoteBatches: [{
+        requestedSymbols: ['AAA'],
+        observedAt: '2026-08-10T20:02:00.000Z',
+        results: [quote],
+      }],
     }))
     assert.equal(draft(output, 'price').asOf, asOf)
   }
@@ -174,7 +216,11 @@ test('preserves stale, future, and extended candidates for the sole timing autho
   quote.quote.last_non_reg_trade_price = '96'
   quote.quote.venue_last_non_reg_trade_time = '2026-08-10T20:01:00.000Z'
   const extended = derive(robinhoodRead({
-    quoteBatches: [{ requestedSymbols: ['AAA'], results: [quote] }],
+    quoteBatches: [{
+      requestedSymbols: ['AAA'],
+      observedAt: '2026-08-10T20:01:00.000Z',
+      results: [quote],
+    }],
   }))
   assert.equal(draft(extended, 'market-session').value, 'EXTENDED')
 })
@@ -185,7 +231,11 @@ test('does not freshness-filter held quotes or capturedAt and observes the real 
     '2026-08-10T20:01:00.001Z',
   ]) {
     const quote = robinhoodQuoteResult('AAA', '95', asOf)
-    const quoteBatches = [{ requestedSymbols: ['AAA'], results: [quote] }]
+    const quoteBatches = [{
+      requestedSymbols: ['AAA'],
+      observedAt: '2026-08-10T20:02:00.000Z',
+      results: [quote],
+    }]
     const unheld = derive(robinhoodRead({ quoteBatches }))
     const held = derive(robinhoodRead({
       positions: [robinhoodPosition('AAA')],
@@ -200,8 +250,16 @@ test('does not freshness-filter held quotes or capturedAt and observes the real 
   }
 
   const capturedAt = '2026-08-10T19:00:00.000Z'
-  const output = derive(robinhoodRead({ capturedAt }))
-  assert.equal(source(output, 'ROBINHOOD_EQUITY_QUOTE').payload.observedAt, capturedAt)
+  const quoteObservedAt = '2026-08-10T19:00:01.000Z'
+  const output = derive(robinhoodRead({
+    capturedAt,
+    quoteBatches: [{
+      requestedSymbols: ['AAA'],
+      observedAt: quoteObservedAt,
+      results: [robinhoodQuoteResult('AAA', '95', '2026-08-10T18:59:00.000Z')],
+    }],
+  }))
+  assert.equal(source(output, 'ROBINHOOD_EQUITY_QUOTE').payload.observedAt, quoteObservedAt)
 })
 
 test('orders same-millisecond quote candidates by nanosecond precision', () => {
@@ -217,13 +275,13 @@ test('orders same-millisecond quote candidates by nanosecond precision', () => {
   assert.equal(draft(output, 'market-session').value, 'EXTENDED')
 })
 
-test('rejects V1, unknown fields, wrong target, and missing or duplicate/conflicting quotes', () => {
+test('rejects V2, unknown fields, wrong targets, and duplicate/conflicting quotes', () => {
   for (const mutate of [
-    read => { read.schemaVersion = 1 },
+    read => { read.schemaVersion = 2 },
     read => { read.order = { symbol: 'AAA' } },
-    read => { read.targetSymbol = 'BBB' },
-    read => { read.earnings.symbol = 'BBB' },
-    read => { read.earnings.data.results[0].order = { symbol: 'AAA' } },
+    read => { read.targetSymbols = ['BBB'] },
+    read => { read.earnings[0].symbol = 'BBB' },
+    read => { read.earnings[0].data.results[0].order = { symbol: 'AAA' } },
     read => { read.quoteBatches[0].results[0].quote.order = { symbol: 'AAA' } },
     read => { read.quoteBatches = [] },
     read => { read.quoteBatches[0].results = [] },
@@ -233,6 +291,113 @@ test('rejects V1, unknown fields, wrong target, and missing or duplicate/conflic
     const read = robinhoodRead()
     mutate(read)
     assert.throws(() => derive(read), /Robinhood read input is invalid/)
+  }
+})
+
+test('V3 validation enforces exact sorted targets and quote batch structure', () => {
+  const valid = robinhoodRead({ targetSymbols: ['AAA', 'BBB'] })
+  assert.equal(validateRobinhoodReadV3(valid, ['AAA', 'BBB']), true)
+  assert.throws(() => validateRobinhoodReadV3(valid, ['AAA']),
+    /Robinhood read input is invalid/)
+
+  for (const mutate of [
+    read => { read.targetSymbols = ['BBB', 'AAA'] },
+    read => { read.targetSymbols = ['AAA', 'AAA'] },
+    read => { read.quoteBatches[0].requestedSymbols = ['BBB', 'AAA'] },
+    read => { read.quoteBatches[0].results.push(robinhoodQuoteResult('CCC')) },
+    read => { read.quoteBatches[0].results.push(robinhoodQuoteResult('AAA')) },
+    read => { delete read.quoteBatches[0].observedAt },
+    read => { read.earnings.reverse() },
+  ]) {
+    const read = robinhoodRead({ targetSymbols: ['AAA', 'BBB'] })
+    mutate(read)
+    assert.throws(() => validateRobinhoodReadV3(read), /Robinhood read input is invalid/)
+  }
+
+  const v2 = robinhoodRead()
+  v2.schemaVersion = 2
+  assert.throws(() => validateRobinhoodReadV3(v2), /Robinhood read input is invalid/)
+})
+
+test('V3 preflight keeps shared provider semantics candidate-local', () => {
+  for (const mutate of [
+    read => { read.portfolio.data.crypto_value = '1' },
+    read => { read.accounts[0].agentic_allowed = false },
+  ]) {
+    const read = robinhoodRead({ targetSymbols: ['AAA', 'BBB'] })
+    mutate(read)
+
+    assert.equal(validateRobinhoodReadV3(read, ['AAA', 'BBB']), true)
+    const results = evaluateCandidateBatch(batchInput(read))
+    assert.deepEqual(results.map(result => [result.symbol, result.dataStatus, result.buyAction]), [
+      ['AAA', 'EVALUATION_BLOCKED', 'NO_ACTION'],
+      ['BBB', 'EVALUATION_BLOCKED', 'NO_ACTION'],
+    ])
+  }
+})
+
+test('quote observation causality uses nanoseconds and remains target-local', () => {
+  const read = robinhoodRead({
+    targetSymbols: ['AAA', 'BBB'],
+    quoteBatches: [{
+      requestedSymbols: ['AAA', 'BBB'],
+      observedAt: '2026-08-10T19:59:00.000000001Z',
+      results: [
+        robinhoodQuoteResult('AAA', '95', '2026-08-10T19:59:00.000000001Z'),
+        robinhoodQuoteResult('BBB', '95', '2026-08-10T19:59:00.000000002Z'),
+      ],
+    }],
+  })
+
+  assert.equal(validateRobinhoodReadV3(read, ['AAA', 'BBB']), true)
+  assert.equal(derive(read).evidenceDrafts.find(item => item.key === 'price').value, 95)
+  assert.throws(() => derive(read, { symbol: 'BBB' }), /Robinhood read input is invalid/)
+
+  read.quoteBatches[0].observedAt = '2026-08-10T19:59:00.000000002Z'
+  assert.equal(derive(read, { symbol: 'BBB' })
+    .evidenceDrafts.find(item => item.key === 'price').value, 95)
+
+  const sharedHeld = robinhoodRead({
+    targetSymbols: ['AAA', 'BBB'],
+    positions: [robinhoodPosition('CCC')],
+    quoteBatches: [{
+      requestedSymbols: ['AAA', 'BBB', 'CCC'],
+      observedAt: '2026-08-10T19:59:00.000000001Z',
+      results: [
+        robinhoodQuoteResult('AAA', '95', '2026-08-10T19:59:00.000000001Z'),
+        robinhoodQuoteResult('BBB', '95', '2026-08-10T19:59:00.000000001Z'),
+        robinhoodQuoteResult('CCC', '95', '2026-08-10T19:59:00.000000002Z'),
+      ],
+    }],
+  })
+  assert.equal(validateRobinhoodReadV3(sharedHeld, ['AAA', 'BBB']), true)
+  for (const symbol of ['AAA', 'BBB']) {
+    assert.throws(() => derive(sharedHeld, { symbol }), /Robinhood read input is invalid/)
+  }
+})
+
+test('isolates target-only quote failures while held quotes remain shared capacity dependencies', () => {
+  const isolated = robinhoodRead({ targetSymbols: ['AAA', 'BBB'] })
+  isolated.quoteBatches[0].results.find(result => result.quote.symbol === 'BBB').quote.state = 'inactive'
+  assert.equal(derive(isolated).evidenceDrafts.find(item => item.key === 'price').value, 95)
+  assert.throws(() => derive(isolated, { symbol: 'BBB' }), /Robinhood read input is invalid/)
+
+  const missingTarget = robinhoodRead({
+    quoteBatches: [{ requestedSymbols: ['AAA'], results: [] }],
+  })
+  assert.equal(validateRobinhoodReadV3(missingTarget), true)
+  const missingResult = evaluateSymbolCase(symbolMarketCase({ robinhoodRead: missingTarget }))
+  assert.equal(missingResult.dataStatus, 'EVALUATION_BLOCKED')
+  assert.equal(missingResult.buyAction, 'NO_ACTION')
+
+  const sharedHeld = robinhoodRead({
+    targetSymbols: ['AAA', 'BBB'],
+    positions: [robinhoodPosition('CCC')],
+  })
+  sharedHeld.quoteBatches[0].results
+    .find(result => result.quote.symbol === 'CCC').quote.state = 'inactive'
+  for (const symbol of ['AAA', 'BBB']) {
+    assert.throws(() => derive(sharedHeld, { symbol }), /Robinhood read input is invalid/)
   }
 })
 
@@ -340,15 +505,19 @@ test('blocks same-day actual earnings whose coarse timing cannot prove completio
 })
 
 test('accepts same-day actual earnings only after the reported New York session boundary', () => {
-  for (const { capturedAt, quoteAsOf, timing } of [
+  for (const { capturedAt, observedAt, quoteAsOf, quoteObservedAt, timing } of [
     {
-      capturedAt: '2026-08-10T13:30:00.000Z',
+      capturedAt: '2026-08-10T12:00:00.000Z',
+      observedAt: '2026-08-10T13:30:00.000Z',
       quoteAsOf: '2026-08-10T13:29:00.000Z',
+      quoteObservedAt: '2026-08-10T13:29:30.000Z',
       timing: 'am',
     },
     {
-      capturedAt: '2026-08-10T20:00:00.001Z',
+      capturedAt: '2026-08-10T19:00:00.000Z',
+      observedAt: '2026-08-10T20:00:00.001Z',
       quoteAsOf: REGULAR_QUOTE_AS_OF,
+      quoteObservedAt: '2026-08-10T19:59:30.000Z',
       timing: 'pm',
     },
   ]) {
@@ -357,16 +526,29 @@ test('accepts same-day actual earnings only after the reported New York session 
     ] })
     const output = derive(robinhoodRead({
       capturedAt,
-      earnings,
+      earningsWrappers: [{ symbol: 'AAA', observedAt, data: earnings }],
       quoteBatches: [{
         requestedSymbols: ['AAA'],
+        observedAt: quoteObservedAt,
         results: [robinhoodQuoteResult('AAA', '95', quoteAsOf)],
       }],
     }))
 
     assert.equal(draft(output, 'earnings-schedule-known').value, true)
-    assert.equal(source(output, 'ROBINHOOD_EARNINGS_CALENDAR').payload.observedAt, capturedAt)
+    assert.equal(source(output, 'ROBINHOOD_EARNINGS_CALENDAR').payload.observedAt, observedAt)
   }
+
+  const beforePm = robinhoodRead({
+    capturedAt: '2026-08-10T21:00:00.000Z',
+    earningsWrappers: [{
+      symbol: 'AAA',
+      observedAt: '2026-08-10T19:59:59.999Z',
+      data: robinhoodEarningsData({ results: [
+        robinhoodEarningsResult({ actual: 1.2, date: '2026-08-10', timing: 'pm' }),
+      ] }),
+    }],
+  })
+  assert.throws(() => derive(beforePm), /Robinhood read input is invalid/)
 })
 
 test('applies capacity freshness independently to each held-position mark', () => {
@@ -458,6 +640,9 @@ function collectorClient({
   positionsByCursor,
   quoteCalls = [],
   earningsCalls = [],
+  sharedCalls = [],
+  methodCalls = [],
+  accountOverrides = {},
   transportError = null,
 } = {}) {
   const accounts = [{
@@ -467,20 +652,30 @@ function collectorClient({
     type: 'cash',
     deactivated: false,
     permanently_deactivated: false,
+    ...accountOverrides,
   }]
   const portfolio = robinhoodRead().portfolio.data
   return {
-    getAccounts: async () => ({ accounts }),
+    getAccounts: async () => {
+      sharedCalls.push('accounts')
+      methodCalls.push('accounts')
+      return { accounts }
+    },
     getPortfolio: async ({ accountNumber }) => {
+      sharedCalls.push('portfolio')
+      methodCalls.push('portfolio')
       if (transportError) throw transportError
       assert.equal(accountNumber, ACCOUNT_NUMBER)
       return portfolio
     },
     getEquityPositions: async ({ accountNumber, cursor }) => {
+      sharedCalls.push(`positions:${cursor ?? 'first'}`)
+      methodCalls.push('positions')
       assert.equal(accountNumber, ACCOUNT_NUMBER)
       return positionsByCursor?.get(cursor ?? null) ?? { positions: [], next: null }
     },
     getEquityQuotes: async ({ symbols }) => {
+      methodCalls.push('quotes')
       quoteCalls.push([...symbols])
       return {
         results: symbols.map(symbol => robinhoodQuoteResult(
@@ -491,6 +686,7 @@ function collectorClient({
       }
     },
     getEarningsResults: async ({ symbol }) => {
+      methodCalls.push('earnings')
       earningsCalls.push(symbol)
       return robinhoodEarningsData({
         results: [robinhoodEarningsResult({ symbol })],
@@ -498,6 +694,31 @@ function collectorClient({
     },
   }
 }
+
+test('collector rejects every ineligible selected account before downstream provider calls', async () => {
+  for (const accountOverrides of [
+    { agentic_allowed: false },
+    { state: 'inactive-secret' },
+    { type: 'margin-secret' },
+    { deactivated: true },
+    { permanently_deactivated: true },
+  ]) {
+    const methodCalls = []
+    await assert.rejects(() => collectRobinhoodRead({
+      selectedAccountNumber: ACCOUNT_NUMBER,
+      targetSymbols: ['AAA'],
+      clock: () => ROBINHOOD_CAPTURED_AT,
+      client: collectorClient({ accountOverrides, methodCalls }),
+    }), error => {
+      assert.equal(error.code, 'INVALID_ROBINHOOD_READ_INPUT')
+      assert.equal(error.message, 'Robinhood read input is invalid')
+      assert.equal(error.message.includes(ACCOUNT_NUMBER), false)
+      assert.equal(error.message.includes('secret'), false)
+      return true
+    })
+    assert.deepEqual(methodCalls, ['accounts'])
+  }
+})
 
 test('collector follows cursors, quotes held union target once, and collects target earnings', async () => {
   const positionsByCursor = new Map([
@@ -509,18 +730,20 @@ test('collector follows cursors, quotes held union target once, and collects tar
   ])
   const quoteCalls = []
   const earningsCalls = []
+  const sharedCalls = []
   const read = await collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
-    client: collectorClient({ positionsByCursor, quoteCalls, earningsCalls }),
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
+    client: collectorClient({ positionsByCursor, quoteCalls, earningsCalls, sharedCalls }),
   })
 
-  assert.equal(read.schemaVersion, 2)
-  assert.equal(read.targetSymbol, 'AAA')
+  assert.equal(read.schemaVersion, 3)
+  assert.deepEqual(read.targetSymbols, ['AAA'])
   assert.equal(read.positionPages.length, 2)
   assert.deepEqual(quoteCalls, [['AAA', 'BBB']])
   assert.deepEqual(earningsCalls, ['AAA'])
+  assert.deepEqual(sharedCalls, ['accounts', 'portfolio', 'positions:first', 'positions:later'])
   assert.equal(read.quoteBatches[0].results[0].quote.venue_last_trade_time,
     '2026-08-10T19:59:01.596466038Z')
   assert.equal(derive(read).portfolio.portfolio.positions.length, 2)
@@ -531,8 +754,8 @@ test('collector quotes the target and resolves earnings even when the account ha
   const earningsCalls = []
   const read = await collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client: collectorClient({ quoteCalls, earningsCalls }),
   })
 
@@ -542,30 +765,80 @@ test('collector quotes the target and resolves earnings even when the account ha
   assert.equal(read.quoteBatches[0].results[0].quote.symbol, 'AAA')
 })
 
-test('collector batches the sorted held-target union in groups of twenty', async () => {
-  const symbols = Array.from({ length: 21 }, (_, index) => `S${String(index).padStart(2, '0')}`)
-  const positions = symbols.map(symbol => robinhoodPosition(symbol))
-  const quoteCalls = []
-  await collectRobinhoodRead({
+test('collector preserves a missing target quote for per-symbol blocked semantics', async () => {
+  const client = collectorClient()
+  client.getEquityQuotes = async () => ({ results: [] })
+  const read = await collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
-    client: collectorClient({
-      positionsByCursor: new Map([[null, { positions, next: null }]]),
-      quoteCalls,
-    }),
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
+    client,
   })
 
-  assert.deepEqual(quoteCalls.map(batch => batch.length), [20, 2])
-  assert.deepEqual(quoteCalls.flat(), ['AAA', ...symbols])
+  assert.deepEqual(read.quoteBatches[0].requestedSymbols, ['AAA'])
+  assert.deepEqual(read.quoteBatches[0].results, [])
+  assert.equal(validateRobinhoodReadV3(read, ['AAA']), true)
+  assert.throws(() => derive(read), /Robinhood read input is invalid/)
+})
+
+test('collector batches exactly twenty and twenty-one sorted targets', async () => {
+  for (const count of [20, 21]) {
+    const targetSymbols = Array.from(
+      { length: count },
+      (_, index) => `S${String(index).padStart(2, '0')}`,
+    )
+    const quoteCalls = []
+    const earningsCalls = []
+    const read = await collectRobinhoodRead({
+      selectedAccountNumber: ACCOUNT_NUMBER,
+      targetSymbols,
+      clock: () => ROBINHOOD_CAPTURED_AT,
+      client: collectorClient({ quoteCalls, earningsCalls }),
+    })
+
+    assert.deepEqual(quoteCalls.map(batch => batch.length), count === 20 ? [20] : [20, 1])
+    assert.deepEqual(quoteCalls.flat(), targetSymbols)
+    assert.deepEqual(earningsCalls, targetSymbols)
+    assert.deepEqual(read.targetSymbols, targetSymbols)
+  }
+})
+
+test('collector records bundle, quote, and per-target earnings observation clocks independently', async () => {
+  const times = [
+    '2026-08-10T20:00:00.000Z',
+    '2026-08-10T20:00:01.000Z',
+    '2026-08-10T20:00:02.000Z',
+    '2026-08-10T20:00:03.000Z',
+  ]
+  const read = await collectRobinhoodRead({
+    selectedAccountNumber: ACCOUNT_NUMBER,
+    targetSymbols: ['AAA', 'BBB'],
+    clock: () => times.shift(),
+    client: collectorClient(),
+  })
+
+  assert.equal(read.capturedAt, '2026-08-10T20:00:00.000Z')
+  assert.equal(read.quoteBatches[0].observedAt, '2026-08-10T20:00:01.000Z')
+  assert.deepEqual(read.earnings.map(wrapper => [wrapper.symbol, wrapper.observedAt]), [
+    ['AAA', '2026-08-10T20:00:02.000Z'],
+    ['BBB', '2026-08-10T20:00:03.000Z'],
+  ])
+  assert.equal(times.length, 0)
 })
 
 test('collector accepts exactly five read methods and never an order capability', async () => {
-  const client = { ...collectorClient(), placeOrder() {} }
   await assert.rejects(() => collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
     targetSymbol: 'AAA',
     capturedAt: ROBINHOOD_CAPTURED_AT,
+    client: collectorClient(),
+  }), /Robinhood read input is invalid/)
+
+  const client = { ...collectorClient(), placeOrder() {} }
+  await assert.rejects(() => collectRobinhoodRead({
+    selectedAccountNumber: ACCOUNT_NUMBER,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client,
   }), /Robinhood read input is invalid/)
 
@@ -573,8 +846,8 @@ test('collector accepts exactly five read methods and never an order capability'
   delete missing.getEarningsResults
   await assert.rejects(() => collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client: missing,
   }), /Robinhood read input is invalid/)
 })
@@ -583,8 +856,8 @@ test('collector propagates transport failures and rejects cursor cycles without 
   const transportError = new Error('transport probe')
   await assert.rejects(() => collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client: collectorClient({ transportError }),
   }), error => error === transportError)
 
@@ -595,8 +868,8 @@ test('collector propagates transport failures and rejects cursor cycles without 
   const before = structuredClone(page)
   await assert.rejects(() => collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client: collectorClient({
       positionsByCursor: new Map([[null, page], ['cycle', page]]),
     }),
@@ -618,8 +891,8 @@ test('collector projects nanosecond provider responses without mutating them', a
 
   const read = await collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client,
   })
 
@@ -639,17 +912,17 @@ test('collector rejects repeated positions, malformed quotes, and malformed earn
   ])
   await assert.rejects(() => collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client: collectorClient({ positionsByCursor: duplicatePages }),
   }), /Robinhood read input is invalid/)
 
   const badQuote = collectorClient()
-  badQuote.getEquityQuotes = async () => ({ results: [] })
+  badQuote.getEquityQuotes = async () => ({ results: [robinhoodQuoteResult('BBB')] })
   await assert.rejects(() => collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client: badQuote,
   }), /Robinhood read input is invalid/)
 
@@ -657,8 +930,8 @@ test('collector rejects repeated positions, malformed quotes, and malformed earn
   badEarnings.getEarningsResults = async () => ({ results: 'not-an-array' })
   await assert.rejects(() => collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client: badEarnings,
   }), /Robinhood read input is invalid/)
 })
@@ -671,11 +944,11 @@ test('public Robinhood read and derived inputs are recursively immutable', async
 
   const read = await collectRobinhoodRead({
     selectedAccountNumber: ACCOUNT_NUMBER,
-    targetSymbol: 'AAA',
-    capturedAt: ROBINHOOD_CAPTURED_AT,
+    targetSymbols: ['AAA'],
+    clock: () => ROBINHOOD_CAPTURED_AT,
     client: collectorClient(),
   })
   assertDeepFrozen(read)
   assert.throws(() => { read.positionPages[0].positions.push(robinhoodPosition('BBB')) }, TypeError)
-  assert.throws(() => { read.earnings.data.results[0].eps.actual = 2 }, TypeError)
+  assert.throws(() => { read.earnings[0].data.results[0].eps.actual = 2 }, TypeError)
 })

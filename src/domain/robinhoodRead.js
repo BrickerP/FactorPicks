@@ -4,7 +4,7 @@ const TICKER = /^[A-Z][A-Z0-9.-]{0,9}$/
 const BUNDLE_KEYS = [
   'schemaVersion',
   'capturedAt',
-  'targetSymbol',
+  'targetSymbols',
   'selectedAccountNumber',
   'accounts',
   'portfolio',
@@ -34,9 +34,9 @@ const POLICY_KEYS = [
 const LIQUIDITY_KEYS = ['maxPositionWeight', 'asOf', 'sourceRef']
 const FRESHNESS_KEYS = ['maxPortfolioAgeMs', 'maxLiquidityAgeMs', 'maxFutureSkewMs']
 const PAGE_KEYS = ['accountNumber', 'cursor', 'next', 'positions']
-const BATCH_KEYS = ['requestedSymbols', 'results']
+const BATCH_KEYS = ['requestedSymbols', 'observedAt', 'results']
 const PORTFOLIO_WRAPPER_KEYS = ['accountNumber', 'data']
-const EARNINGS_WRAPPER_KEYS = ['symbol', 'data']
+const EARNINGS_WRAPPER_KEYS = ['symbol', 'observedAt', 'data']
 const EARNINGS_DATA_KEYS = ['not_found', 'results']
 const EARNINGS_RESULT_KEYS = ['symbol', 'year', 'quarter', 'eps', 'report']
 const EPS_KEYS = ['estimate', 'actual']
@@ -350,14 +350,137 @@ function marketQuote(result, expectedSymbol) {
   return { price, asOf, session }
 }
 
-function validateAccount(bundle) {
-  if (!Array.isArray(bundle.accounts) || bundle.accounts.some(account =>
+function selectedAccount(accounts, selectedAccountNumber) {
+  if (!Array.isArray(accounts) || accounts.some(account =>
     !object(account) || !onlyKeys(account, ACCOUNT_KEYS) || !nonEmpty(account.account_number))) fail()
-  const selected = bundle.accounts.filter(account =>
-    account.account_number === bundle.selectedAccountNumber)
-  if (selected.length !== 1 || selected[0].agentic_allowed !== true ||
-      selected[0].state !== 'active' || selected[0].type !== 'cash' ||
-      selected[0].deactivated !== false || selected[0].permanently_deactivated !== false) fail()
+  const selected = accounts.filter(account => account.account_number === selectedAccountNumber)
+  if (selected.length !== 1) fail()
+  return selected[0]
+}
+
+function validateAccountEligibility(account) {
+  if (account.agentic_allowed !== true || account.state !== 'active' || account.type !== 'cash' ||
+      account.deactivated !== false || account.permanently_deactivated !== false) fail()
+}
+
+function validateSharedSemantics(context) {
+  validateAccountEligibility(context.selectedAccount)
+  const portfolioData = context.portfolioData
+  const totalValue = decimal(portfolioData.total_value, { positive: true })
+  if (portfolioData.currency !== 'USD' || totalValue === null ||
+      decimal(portfolioData.equity_value) === null ||
+      NON_EQUITY_VALUES.some(key => decimal(portfolioData[key]) !== 0)) fail()
+  for (const position of context.rawPositions) {
+    if (position.type !== 'long' || decimal(position.quantity, { positive: true }) === null) fail()
+  }
+  return totalValue
+}
+
+function observedMarketQuote(entry, expectedSymbol) {
+  const quote = marketQuote(entry.result, expectedSymbol)
+  if (epochNanoseconds(entry.observedAt) < epochNanoseconds(quote.asOf)) fail()
+  return quote
+}
+
+function sortedUniqueTickers(value) {
+  return Array.isArray(value) && value.length > 0 &&
+    value.every(symbol => TICKER.test(symbol ?? '')) &&
+    new Set(value).size === value.length &&
+    value.every((symbol, index) => index === 0 || value[index - 1] < symbol)
+}
+
+function sameValues(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function structuralQuoteSymbol(result) {
+  if (!object(result) || !onlyKeys(result, ['quote', 'close']) || !object(result.quote) ||
+      !onlyKeys(result.quote, QUOTE_KEYS) || !TICKER.test(result.quote.symbol ?? '')) fail()
+  if (Object.hasOwn(result, 'close') && result.close !== null &&
+      (!object(result.close) || !onlyKeys(result.close, CLOSE_KEYS) ||
+        (Object.hasOwn(result.close, 'symbol') && result.close.symbol !== result.quote.symbol))) fail()
+  return result.quote.symbol
+}
+
+function inspectRobinhoodReadV3(bundle, expectedTargets) {
+  if (!exactKeys(bundle, BUNDLE_KEYS) || bundle.schemaVersion !== 3 ||
+      !canonicalTimestamp(bundle.capturedAt) || !sortedUniqueTickers(bundle.targetSymbols) ||
+      !nonEmpty(bundle.selectedAccountNumber) ||
+      !exactKeys(bundle.portfolio, PORTFOLIO_WRAPPER_KEYS) ||
+      bundle.portfolio.accountNumber !== bundle.selectedAccountNumber ||
+      !object(bundle.portfolio.data) || !Array.isArray(bundle.positionPages) ||
+      bundle.positionPages.length === 0 || !Array.isArray(bundle.quoteBatches) ||
+      bundle.quoteBatches.length === 0 || !Array.isArray(bundle.earnings)) fail()
+  if (expectedTargets !== undefined && (!sortedUniqueTickers(expectedTargets) ||
+      !sameValues(bundle.targetSymbols, expectedTargets))) fail()
+
+  const account = selectedAccount(bundle.accounts, bundle.selectedAccountNumber)
+  const portfolioData = bundle.portfolio.data
+  if (!onlyKeys(portfolioData, PORTFOLIO_KEYS)) fail()
+
+  const rawPositions = []
+  const heldSymbols = new Set()
+  const seenCursors = new Set()
+  let expectedCursor = null
+  for (const page of bundle.positionPages) {
+    if (seenCursors.has(expectedCursor)) fail()
+    seenCursors.add(expectedCursor)
+    if (!exactKeys(page, PAGE_KEYS) || page.accountNumber !== bundle.selectedAccountNumber ||
+        page.cursor !== expectedCursor || !Array.isArray(page.positions)) fail()
+    for (const position of page.positions) {
+      if (!object(position) || !onlyKeys(position, POSITION_KEYS) ||
+          !TICKER.test(position.symbol ?? '') || heldSymbols.has(position.symbol)) fail()
+      heldSymbols.add(position.symbol)
+      rawPositions.push(position)
+    }
+    expectedCursor = nextCursor(page.next)
+  }
+  if (expectedCursor !== null) fail()
+
+  const expectedSymbols = [...new Set([...heldSymbols, ...bundle.targetSymbols])].sort()
+  const requested = []
+  const results = new Map()
+  for (const batch of bundle.quoteBatches) {
+    if (!exactKeys(batch, BATCH_KEYS) || !canonicalTimestamp(batch.observedAt) ||
+        !Array.isArray(batch.requestedSymbols) || batch.requestedSymbols.length === 0 ||
+        batch.requestedSymbols.length > 20 || !Array.isArray(batch.results) ||
+        batch.results.length > batch.requestedSymbols.length ||
+        !sortedUniqueTickers(batch.requestedSymbols)) fail()
+    requested.push(...batch.requestedSymbols)
+    const batchRequested = new Set(batch.requestedSymbols)
+    for (const result of batch.results) {
+      const ticker = structuralQuoteSymbol(result)
+      if (!batchRequested.has(ticker) || results.has(ticker)) fail()
+      results.set(ticker, { result, observedAt: batch.observedAt })
+    }
+  }
+  if (!sameValues(requested, expectedSymbols) ||
+      [...heldSymbols].some(symbol => !results.has(symbol))) fail()
+
+  if (bundle.earnings.length !== bundle.targetSymbols.length) fail()
+  const earnings = new Map()
+  for (let index = 0; index < bundle.earnings.length; index += 1) {
+    const wrapper = bundle.earnings[index]
+    const symbol = bundle.targetSymbols[index]
+    if (!exactKeys(wrapper, EARNINGS_WRAPPER_KEYS) || wrapper.symbol !== symbol ||
+        !canonicalTimestamp(wrapper.observedAt) ||
+        !exactKeys(wrapper.data, EARNINGS_DATA_KEYS) ||
+        !Array.isArray(wrapper.data.not_found) || !Array.isArray(wrapper.data.results)) fail()
+    earnings.set(symbol, wrapper)
+  }
+  return {
+    selectedAccount: account,
+    portfolioData,
+    rawPositions,
+    heldSymbols,
+    quoteResults: results,
+    earnings,
+  }
+}
+
+export function validateRobinhoodReadV3(robinhoodRead, expectedTargets) {
+  inspectRobinhoodReadV3(robinhoodRead, expectedTargets)
+  return true
 }
 
 function newYorkDate(value) {
@@ -425,7 +548,7 @@ function validateEarnings(earnings, symbol, observedAt) {
   }
 }
 
-function buildMarketEvidence(symbol, capturedAt, quote, earnings) {
+function buildMarketEvidence(symbol, quote, quoteObservedAt, earnings, earningsObservedAt) {
   const scope = { symbol }
   const quoteSource = createSnapshot('source', {
     role: 'SOURCE',
@@ -434,7 +557,7 @@ function buildMarketEvidence(symbol, capturedAt, quote, earnings) {
     symbol,
     currency: 'USD',
     asOf: quote.asOf,
-    observedAt: capturedAt,
+    observedAt: quoteObservedAt,
     facts: [
       {
         factKey: 'CURRENT_PRICE',
@@ -471,12 +594,12 @@ function buildMarketEvidence(symbol, capturedAt, quote, earnings) {
     schemaVersion: 1,
     symbol,
     currency: 'USD',
-    asOf: capturedAt,
-    observedAt: capturedAt,
+    asOf: earningsObservedAt,
+    observedAt: earningsObservedAt,
     facts: earningsFacts.map(fact => ({
       factKey: fact.factKey,
       value: fact.value,
-      asOf: capturedAt,
+      asOf: earningsObservedAt,
       scope,
     })),
   })
@@ -504,7 +627,7 @@ function buildMarketEvidence(symbol, capturedAt, quote, earnings) {
         factKey: 'MARKET_SESSION',
         value: quote.session,
       }, quoteSource.ref.id, quote.asOf),
-      ...earningsFacts.map(fact => observed(fact, earningsSource.ref.id, capturedAt)),
+      ...earningsFacts.map(fact => observed(fact, earningsSource.ref.id, earningsObservedAt)),
     ],
     sourceKinds: { ...SOURCE_KINDS },
   }
@@ -520,78 +643,28 @@ function derive(input) {
     capacityPolicy,
   } = input
   if (!TICKER.test(symbol ?? '') || !canonicalTimestamp(evaluatedAt) || !object(stat) ||
-      !exactKeys(robinhoodRead, BUNDLE_KEYS) || robinhoodRead.schemaVersion !== 2 ||
-      robinhoodRead.targetSymbol !== symbol || !canonicalTimestamp(robinhoodRead.capturedAt) ||
-      !nonEmpty(robinhoodRead.selectedAccountNumber) ||
-      !exactKeys(robinhoodRead.portfolio, PORTFOLIO_WRAPPER_KEYS) ||
-      robinhoodRead.portfolio.accountNumber !== robinhoodRead.selectedAccountNumber ||
-      !object(robinhoodRead.portfolio.data) ||
-      !Array.isArray(robinhoodRead.positionPages) || robinhoodRead.positionPages.length === 0 ||
-      !Array.isArray(robinhoodRead.quoteBatches) || robinhoodRead.quoteBatches.length === 0 ||
       !exactKeys(capacityPolicy, CAPACITY_POLICY_KEYS) ||
       !exactKeys(capacityPolicy.policy, POLICY_KEYS) ||
       !exactKeys(capacityPolicy.liquidity, LIQUIDITY_KEYS) ||
       !exactKeys(capacityPolicy.freshnessPolicy, FRESHNESS_KEYS)) fail()
 
   validateFreshnessPolicy(capacityPolicy.freshnessPolicy)
-  validateAccount(robinhoodRead)
+  const context = inspectRobinhoodReadV3(robinhoodRead)
+  if (!robinhoodRead.targetSymbols.includes(symbol)) fail()
+  const totalValue = validateSharedSemantics(context)
 
-  const portfolioData = robinhoodRead.portfolio.data
-  const totalValue = decimal(portfolioData.total_value, { positive: true })
-  if (!onlyKeys(portfolioData, PORTFOLIO_KEYS) || portfolioData.currency !== 'USD' ||
-      totalValue === null || decimal(portfolioData.equity_value) === null ||
-      NON_EQUITY_VALUES.some(key => decimal(portfolioData[key]) !== 0)) fail()
-
-  const rawPositions = []
-  let expectedCursor = null
-  const seenCursors = new Set()
-  for (const page of robinhoodRead.positionPages) {
-    if (seenCursors.has(expectedCursor)) fail()
-    seenCursors.add(expectedCursor)
-    if (!exactKeys(page, PAGE_KEYS) || page.accountNumber !== robinhoodRead.selectedAccountNumber ||
-        page.cursor !== expectedCursor || !Array.isArray(page.positions)) fail()
-    for (const position of page.positions) {
-      if (!object(position) || !onlyKeys(position, POSITION_KEYS) ||
-          !TICKER.test(position.symbol ?? '') || position.type !== 'long' ||
-          decimal(position.quantity, { positive: true }) === null) fail()
-      rawPositions.push(position)
-    }
-    expectedCursor = nextCursor(page.next)
-  }
-  if (expectedCursor !== null) fail()
-
-  const heldSymbols = new Set()
-  for (const position of rawPositions) {
-    if (heldSymbols.has(position.symbol)) fail()
-    heldSymbols.add(position.symbol)
-  }
-  const expectedSymbols = new Set([...heldSymbols, symbol])
   const quotes = new Map()
-  const requested = new Set()
-  for (const batch of robinhoodRead.quoteBatches) {
-    if (!exactKeys(batch, BATCH_KEYS) || !Array.isArray(batch.requestedSymbols) ||
-        batch.requestedSymbols.length === 0 || batch.requestedSymbols.length > 20 ||
-        !Array.isArray(batch.results) || batch.results.length !== batch.requestedSymbols.length) fail()
-    const batchRequested = new Set(batch.requestedSymbols)
-    if (batchRequested.size !== batch.requestedSymbols.length) fail()
-    for (const ticker of batch.requestedSymbols) {
-      if (!TICKER.test(ticker) || requested.has(ticker)) fail()
-      requested.add(ticker)
-    }
-    for (const result of batch.results) {
-      const ticker = result?.quote?.symbol
-      if (!batchRequested.has(ticker) || quotes.has(ticker)) fail()
-      quotes.set(ticker, marketQuote(result, ticker))
-    }
+  for (const ticker of context.heldSymbols) {
+    quotes.set(ticker, observedMarketQuote(context.quoteResults.get(ticker), ticker))
   }
-  if (requested.size !== expectedSymbols.size || quotes.size !== expectedSymbols.size ||
-      [...expectedSymbols].some(ticker => !requested.has(ticker) || !quotes.has(ticker))) fail()
-
-  const targetQuote = quotes.get(symbol)
+  const targetQuoteEntry = context.quoteResults.get(symbol)
+  if (!targetQuoteEntry) fail()
+  const targetQuote = quotes.get(symbol) ?? observedMarketQuote(targetQuoteEntry, symbol)
+  quotes.set(symbol, targetQuote)
 
   const targetClassification = stat[symbol]
   if (!nonEmpty(targetClassification?.sector) || !nonEmpty(targetClassification?.industry)) fail()
-  const positions = rawPositions.map(position => {
+  const positions = context.rawPositions.map(position => {
     const classification = stat[position.symbol]
     if (!nonEmpty(classification?.sector) || !nonEmpty(classification?.industry)) fail()
     const quote = quotes.get(position.symbol)
@@ -608,7 +681,7 @@ function derive(input) {
     }
   })
   const sanitizedFacts = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     capturedAt: robinhoodRead.capturedAt,
     currency: 'USD',
     totalValue,
@@ -645,14 +718,17 @@ function derive(input) {
     liquidity: structuredClone(capacityPolicy.liquidity),
     freshnessPolicy: structuredClone(capacityPolicy.freshnessPolicy),
   }
-  const earnings = validateEarnings(
-    robinhoodRead.earnings,
-    symbol,
-    robinhoodRead.capturedAt,
-  )
+  const earningsWrapper = context.earnings.get(symbol)
+  const earnings = validateEarnings(earningsWrapper, symbol, earningsWrapper.observedAt)
   return deepFreeze({
     portfolio,
-    ...buildMarketEvidence(symbol, robinhoodRead.capturedAt, targetQuote, earnings),
+    ...buildMarketEvidence(
+      symbol,
+      targetQuote,
+      targetQuoteEntry.observedAt,
+      earnings,
+      earningsWrapper.observedAt,
+    ),
   })
 }
 
@@ -668,19 +744,23 @@ export function deriveRobinhoodInputs(input) {
 }
 
 export async function collectRobinhoodRead(input) {
-  if (!exactKeys(input, ['selectedAccountNumber', 'targetSymbol', 'capturedAt', 'client'])) fail()
-  const { selectedAccountNumber, targetSymbol, client } = input
-  const capturedAt = normalizeTimestamp(input.capturedAt)
-  if (!nonEmpty(selectedAccountNumber) || !TICKER.test(targetSymbol ?? '') || capturedAt === null ||
-      !exactKeys(client, CLIENT_KEYS) || CLIENT_KEYS.some(key => typeof client[key] !== 'function')) fail()
+  if (!onlyKeys(input, ['selectedAccountNumber', 'targetSymbols', 'client', 'clock']) ||
+      !['selectedAccountNumber', 'targetSymbols', 'client'].every(key => Object.hasOwn(input, key))) fail()
+  const { selectedAccountNumber, targetSymbols, client } = input
+  const clock = input.clock ?? (() => new Date().toISOString())
+  if (!nonEmpty(selectedAccountNumber) || !sortedUniqueTickers(targetSymbols) ||
+      typeof clock !== 'function' || !exactKeys(client, CLIENT_KEYS) ||
+      CLIENT_KEYS.some(key => typeof client[key] !== 'function')) fail()
+  const readClock = () => {
+    const value = normalizeTimestamp(clock())
+    if (value === null) fail()
+    return value
+  }
 
   const accountResponse = await client.getAccounts()
   if (!object(accountResponse) || !Array.isArray(accountResponse.accounts)) fail()
   const accounts = accountResponse.accounts.map(account => project(account, ACCOUNT_KEYS))
-  const selected = accounts.filter(account => account.account_number === selectedAccountNumber)
-  if (selected.length !== 1 || selected[0].agentic_allowed !== true ||
-      selected[0].state !== 'active' || selected[0].type !== 'cash' ||
-      selected[0].deactivated !== false || selected[0].permanently_deactivated !== false) fail()
+  validateAccountEligibility(selectedAccount(accounts, selectedAccountNumber))
 
   const portfolioData = project(
     await client.getPortfolio({ accountNumber: selectedAccountNumber }),
@@ -716,11 +796,13 @@ export async function collectRobinhoodRead(input) {
     if (cursor === null) break
   }
 
-  const symbols = [...new Set([...positionsBySymbol.keys(), targetSymbol])].sort()
+  const capturedAt = readClock()
+  const symbols = [...new Set([...positionsBySymbol.keys(), ...targetSymbols])].sort()
   const quoteBatches = []
   for (let start = 0; start < symbols.length; start += 20) {
     const requestedSymbols = symbols.slice(start, start + 20)
     const response = await client.getEquityQuotes({ symbols: [...requestedSymbols] })
+    const observedAt = readClock()
     if (!object(response) || !Array.isArray(response.results)) fail()
     const resultsBySymbol = new Map()
     for (const rawResult of response.results) {
@@ -729,26 +811,36 @@ export async function collectRobinhoodRead(input) {
       if (!requestedSymbols.includes(ticker) || resultsBySymbol.has(ticker)) fail()
       resultsBySymbol.set(ticker, result)
     }
-    if (resultsBySymbol.size !== requestedSymbols.length) fail()
     quoteBatches.push({
       requestedSymbols,
-      results: requestedSymbols.map(ticker => resultsBySymbol.get(ticker)),
+      observedAt,
+      results: requestedSymbols
+        .filter(ticker => resultsBySymbol.has(ticker))
+        .map(ticker => resultsBySymbol.get(ticker)),
     })
   }
 
-  const earningsData = projectEarningsData(
-    await client.getEarningsResults({ symbol: targetSymbol }),
-    targetSymbol,
-  )
-  return deepFreeze({
-    schemaVersion: 2,
+  const earnings = []
+  for (const symbol of targetSymbols) {
+    const response = await client.getEarningsResults({ symbol })
+    const observedAt = readClock()
+    earnings.push({
+      symbol,
+      observedAt,
+      data: projectEarningsData(response, symbol),
+    })
+  }
+  const result = {
+    schemaVersion: 3,
     capturedAt,
-    targetSymbol,
+    targetSymbols: [...targetSymbols],
     selectedAccountNumber,
     accounts,
     portfolio: { accountNumber: selectedAccountNumber, data: portfolioData },
     positionPages,
     quoteBatches,
-    earnings: { symbol: targetSymbol, data: earningsData },
-  })
+    earnings,
+  }
+  validateRobinhoodReadV3(result, targetSymbols)
+  return deepFreeze(result)
 }

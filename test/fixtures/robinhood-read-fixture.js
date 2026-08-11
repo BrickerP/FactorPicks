@@ -58,11 +58,12 @@ function earningsData({ results, notFound = [] } = {}) {
 }
 
 export function robinhoodRead({
-  targetSymbol = 'AAA',
+  targetSymbols = ['AAA'],
   positions = [],
   positionPages,
   quoteBatches,
-  earnings = earningsData({ results: [earningsResult({ symbol: targetSymbol })] }),
+  earnings,
+  earningsWrappers,
   totalValue = '100000.00',
   capturedAt = ROBINHOOD_CAPTURED_AT,
 } = {}) {
@@ -72,18 +73,26 @@ export function robinhoodRead({
     next: null,
     positions,
   }]
+  const pagePositions = pages.flatMap(page => page.positions)
   const tickers = [...new Set([
-    ...pages.flatMap(page => page.positions.map(item => item.symbol)),
-    targetSymbol,
+    ...pagePositions.map(item => item.symbol),
+    ...targetSymbols,
   ])].sort()
-  const batches = quoteBatches ?? [{
+  const batches = (quoteBatches ?? [{
     requestedSymbols: tickers,
     results: tickers.map(ticker => quoteResult(ticker)),
-  }]
+  }]).map(batch => ({ observedAt: capturedAt, ...batch }))
+  const earningsByTarget = earningsWrappers ?? targetSymbols.map((symbol, index) => ({
+    symbol,
+    observedAt: capturedAt,
+    data: index === 0 && earnings !== undefined
+      ? earnings
+      : earningsData({ results: [earningsResult({ symbol })] }),
+  }))
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     capturedAt,
-    targetSymbol,
+    targetSymbols: [...targetSymbols],
     selectedAccountNumber: ACCOUNT_NUMBER,
     accounts: [{
       account_number: ACCOUNT_NUMBER,
@@ -98,7 +107,7 @@ export function robinhoodRead({
       data: {
         currency: 'USD',
         total_value: totalValue,
-        equity_value: tickers.length === 1 && positions.length === 0 ? '0' : '5000',
+        equity_value: pagePositions.length === 0 ? '0' : '5000',
         options_value: '0',
         crypto_value: '0',
         fixed_income_value: '0',
@@ -109,7 +118,7 @@ export function robinhoodRead({
     },
     positionPages: pages,
     quoteBatches: batches,
-    earnings: { symbol: targetSymbol, data: earnings },
+    earnings: earningsByTarget,
   }
 }
 

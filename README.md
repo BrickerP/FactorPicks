@@ -52,104 +52,69 @@ GitHub Actions (daily 02:10 UTC, or manual dispatch)
 
 ## Headless decision workbench
 
-The private workbench is the one end-to-end entry point for a symbol decision.
-The CLI reads the private case from a named local file and one canonical
-`RobinhoodReadV2` collector bundle of allow-listed normalized projections from
-stdin, then obtains the public research inputs
-itself: exactly one `GET` each for `stat.json` and `data-quality.json`. The
-default public base is `https://brickerp.github.io/FactorPicks/`; `--market-url`
-selects another trusted base, such as a local read-only test server. The private
-case is never placed in a request body, header, URL, log, or public artifact.
-`stat.json` is retained as the exact UTF-8 response text, never parsed and
-re-serialized before evaluation. The quality manifest's `statArtifact`
-`sha256`, byte count, and symbol count bind that exact text to the manifest;
-any artifact/manifest mismatch fails closed.
+The private workbench is the one end-to-end entry point for a batch of candidate
+decisions. It reads an external owner-only cases file and one canonical
+`RobinhoodReadV3` bundle from stdin, then performs exactly one `GET` each for
+`stat.json` and `data-quality.json`, regardless of candidate count. The default
+public base is `https://brickerp.github.io/FactorPicks/`; `--market-url` selects
+another trusted base. Private cases never enter a request, log, public artifact,
+stdout, stderr, or the ledger. The raw `stat.json` bytes remain bound to the
+quality manifest by SHA-256, byte count, and symbol count.
 
 ```text
-public stat + quality manifest + private case + RobinhoodReadV2 collector bundle
-  → evaluateSymbolCase
-  → evaluateResearch
-  → deriveRobinhoodInputs (regular-hours quote + earnings + portfolio facts)
-  → deriveEvidenceBundle
-  → deriveStructuredUnderwriting
-  → deriveTimingAssessment
-  → derivePortfolioCapacitySnapshot
-  → evaluateDecision
+candidate cases + public stat/quality + one RobinhoodReadV3
+  → evaluateCandidateBatch
+  → canonicalize, reject duplicates, validate the exact target set
+  → evaluateSymbolCase once per candidate
+  → sorted DecisionRecordV2[]
 ```
 
-The private case contains only `schemaVersion`, `researchPolicy`,
-`sourceSnapshots`, `evidence`, `underwriting`, `timing`, `capacityPolicy`, and
-`decisionPolicy`. The collector bundle contains exactly `schemaVersion`,
-`capturedAt`, `targetSymbol`, `selectedAccountNumber`, `accounts`, `portfolio`,
-`positionPages`, `quoteBatches`, and `earnings`; `portfolio` is bound to the
-selected account as `{accountNumber, data}` and `earnings` to the target symbol.
-The bundle's target must equal the CLI symbol. After validating the raw artifact
-binding, the public Yahoo row remains a research and classification input only;
-it is not the real-time price authority. The projector alone reserves and emits
-the newest Robinhood trade candidate, its `REGULAR`/`EXTENDED` session fact, and
-earnings Evidence. `deriveTimingAssessment` is the sole freshness and session
-gate: only a fresh regular-hours candidate can authorize evaluation; official
-close, pre-market, after-hours, weekend, stale, future, conflicting, missing, or
-untraded state fails closed. Verified and tentative upcoming earnings inside the
-policy window both produce `EVENT_RISK`; empty, unavailable, or malformed
-earnings data is blocked. The private timing policy contains only
-`schemaVersion`, `maxQuoteAgeMs`, `maxFutureSkewMs`, and
-`earningsRiskWindowDays`; callers cannot supply machine timing claims or facts.
-Analyst targets and historical prices may remain ordinary evidence under
-different names, but they cannot become `evaluatedPrice`. The adapter does not
-infer missing quote, valuation, timing, capacity, policy, or action data from the
-public ranking.
-Content-addressed projectors reject tampering,
-duplicates, stale/conflicting observations, and wrong-symbol/as-of data. The
-final action is only `OPEN`, `ADD`, `PILOT`, `WATCH`, or `NO_ACTION`; this
-repository has no order path, direct Robinhood HTTP/auth client, or workbench UI.
+The cases file is exact:
 
-Every invocation below assumes the Codex runtime has connected the normalized
-V2 collector result directly to stdin and will close the stream; the bundle is
-not written to a file.
+```text
+{ schemaVersion: 1, candidates: [{ symbol, privateCase }] }
+```
+
+It must be outside the repository, a regular `0400` or `0600` file, and have no
+symlink target or ancestor. The CLI opens it with `O_RDONLY | O_NOFOLLOW`, binds
+the verified file descriptor to the checked path/device/inode, reads it once,
+and revalidates the path before continuing. Canonical duplicate symbols fail
+before stdin, public I/O, or ledger creation. `--symbol`, `--case`, V2, unknown
+arguments, and trading arguments are not compatibility paths.
+
+The cases file and ledger must also resolve to different device/inode identities;
+a second path or hard link is not a separate file. The CLI rejects that alias
+before stdin, public I/O, evaluation, or writing, and rechecks the opened ledger
+against the bound cases identity before the append.
+
+The Codex runtime connects the normalized V3 collector result directly to stdin
+and closes the stream; neither provider input is persisted.
 
 ```bash
-npm run workbench -- --symbol AAPL --case /secure/path/private-case.json
+npm run workbench -- --cases /secure/path/candidate-cases.json
 
-# Optional public base and deterministic evaluation time.
-npm run workbench -- --symbol AAPL --case /secure/path/private-case.json \
+# Optional public base, deterministic evaluation time, and sanitized ledger.
+npm run workbench -- --cases /secure/path/candidate-cases.json \
   --market-url https://brickerp.github.io/FactorPicks/ \
-  --evaluated-at 2026-08-10T08:00:00.000Z
-
-# Optional append to an external private ledger (never inside this repository).
-npm run workbench -- --symbol AAPL --case /secure/path/private-case.json \
+  --evaluated-at 2026-08-10T20:00:00.000Z \
   --ledger /secure/private-ledger/decisions.jsonl
 ```
 
 The Codex runtime binds
-`collectRobinhoodRead({selectedAccountNumber, targetSymbol, capturedAt, client})`
+`collectRobinhoodRead({selectedAccountNumber, targetSymbols, client, clock?})`
 to an authenticated client with only `getAccounts`, `getPortfolio`,
 `getEquityPositions`, `getEquityQuotes`, and `getEarningsResults`.
-Those methods correspond to the MCP read allowlist `get_accounts`,
-`get_portfolio`, `get_equity_positions`, `get_equity_quotes`, and
-`get_earnings_results`. The collector selects the account explicitly, follows
-all position pages, quotes the de-duplicated union of the target and held symbols
-in batches of at most 20, reads earnings only for the target, and emits one
-normalized V2 projection; MCP transport responses are not the CLI bundle.
-Plain Node holds no MCP authentication and only consumes the collected bundle
-implicitly on stdin. It never calls Robinhood, retries collection, caches or writes the
-bundle, or places, amends, cancels, or simulates an order. There is no alternate
-CLI or UI path.
-Portfolio capacity remains authoritative only in
-`derivePortfolioCapacitySnapshot`, and `OPEN`/`ADD` remain authoritative only in
-`evaluateDecision`.
+It quotes the sorted de-duplicated union of all targets and holdings in batches
+of at most 20 and retrieves one earnings result per target. Plain Node owns no
+MCP authentication and makes no Robinhood call. It has no UI, order, cancel,
+amend, simulation, or alternate market CLI.
 
-Semantic data problems, including a V1 or structurally complete but invalid V2
-collector bundle, produce `EVALUATION_BLOCKED` + `NO_ACTION` with bounded blocker codes and
-exit zero. Missing/empty collection, invalid arguments or stdin transport JSON,
-private-case JSON/top-level shape, public HTTP/JSON, and file I/O errors exit one
-with generalized stderr. NLV/`total_value`, quantity, mark price,
-average buy price, pagination cursors, account identifiers,
-credentials, source payloads, free-form invalidation conditions/responses, and
-private claims are never copied to the output or ledger. The public invalidation
-projection contains only rule identity, evidence references, bounded severity,
-and state. Derived fields submitted by a caller are rejected; only canonical
-raw sections are accepted. The complete contract and action matrix are documented in
+Per-candidate semantic gaps return an exit-zero array containing fail-closed
+`NO_ACTION` records. Cases/provider/public transport errors, duplicate symbols,
+V3 target-set mismatch, or any global input error exit one with no stdout or
+ledger append. Successful stdout is one JSON array line; `--ledger` appends that
+exact sanitized line once to an external `0600` file. The complete contract and
+action matrix are documented in
 [`docs/decision-workbench.md`](docs/decision-workbench.md).
 
 ## Local development

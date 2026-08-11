@@ -339,7 +339,7 @@ test('rejects private market-session and earnings-schedule machine facts', () =>
   }
 })
 
-test('malformed Robinhood V2 data fails closed instead of falling back to Yahoo Close', () => {
+test('malformed or legacy Robinhood reads fail closed instead of falling back to Yahoo Close', () => {
   const read = robinhoodRead()
   delete read.earnings
   const result = evaluateSymbolCase(symbolMarketCase({ robinhoodRead: read }))
@@ -347,6 +347,10 @@ test('malformed Robinhood V2 data fails closed instead of falling back to Yahoo 
   assertBlocked(result)
   assert.equal(result.evaluatedPrice, null)
   assert.ok(result.blockerCodes.includes('INVALID_PORTFOLIO_CAPACITY'))
+
+  const legacy = robinhoodRead()
+  legacy.schemaVersion = 2
+  assertBlocked(evaluateSymbolCase(symbolMarketCase({ robinhoodRead: legacy })))
 })
 
 test('derives earnings risk, RTH, and freshness only from Robinhood machine evidence', () => {
