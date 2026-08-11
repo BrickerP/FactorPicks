@@ -338,22 +338,22 @@ test('decision inputs fail closed when stale future-dated or temporally incohere
     const stale = evaluateDecision(withAsOf(component, '2020-01-01T00:00:00.000Z'))
     assertBlocked(stale, 'STALE_DECISION_INPUT', `${component} stale`)
 
-    const future = evaluateDecision(withAsOf(component, '2026-08-09T08:05:00.000Z'))
+    const future = evaluateDecision(withAsOf(component, '2026-08-10T20:05:00.000Z'))
     assertBlocked(future, 'FUTURE_DECISION_INPUT', `${component} future`)
   }
 
   const quoteTimingMismatch = decisionInput()
-  quoteTimingMismatch.timingAssessment.asOf = '2026-08-09T07:56:00.000Z'
+  quoteTimingMismatch.timingAssessment.asOf = '2026-08-10T19:56:00.000Z'
   const mismatchedQuote = evaluateDecision(quoteTimingMismatch)
   assert.ok(mismatchedQuote.blockerCodes.includes('INCOHERENT_AS_OF'))
 
   const valuationEntryMismatch = decisionInput()
-  valuationEntryMismatch.underwriting.entryRange.asOf = '2026-08-09T07:56:00.000Z'
+  valuationEntryMismatch.underwriting.entryRange.asOf = '2026-08-10T19:56:00.000Z'
   const mismatchedRange = evaluateDecision(valuationEntryMismatch)
   assert.ok(mismatchedRange.blockerCodes.includes('INCOHERENT_AS_OF'))
 
   const capacityMismatch = decisionInput()
-  capacityMismatch.portfolioCapacity.denominator.asOf = '2026-08-09T07:56:00.000Z'
+  capacityMismatch.portfolioCapacity.denominator.asOf = '2026-08-10T19:56:00.000Z'
   const mismatchedCapacity = evaluateDecision(capacityMismatch)
   assert.ok(mismatchedCapacity.blockerCodes.includes('INCOHERENT_AS_OF'))
 })

@@ -23,8 +23,11 @@ import { NOW, symbolMarketCase } from './fixtures/symbol-market-case-fixture.js'
 import {
   ACCOUNT_NUMBER,
   addRead,
+  robinhoodEarningsData,
+  robinhoodEarningsResult,
+  robinhoodQuoteResult,
   robinhoodRead as robinhoodReadFixture,
-} from './fixtures/robinhood-portfolio-fixture.js'
+} from './fixtures/robinhood-read-fixture.js'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SCRIPT = join(ROOT, 'scripts/evaluate-workbench.js')
@@ -112,7 +115,7 @@ function robinhoodRead(overrides = {}) {
   return { ...base, ...structuredClone(overrides) }
 }
 
-const PRIVATE_OUTPUT = /account_number|selectedAccountNumber|netLiquidationValue|\bNLV\b|total_value|quantity|markPrice|average_buy_price|cursor|RH-PRIVATE-4321|account-number-do-not-echo/i
+const PRIVATE_OUTPUT = /account_number|selectedAccountNumber|netLiquidationValue|\bNLV\b|total_value|quantity|markPrice|average_buy_price|cursor|last_trade_price|last_non_reg_trade_price|venue_last_trade_time|venue_last_non_reg_trade_time|not_found|\beps\b|estimate|actual|verified|RH-PRIVATE-4321|account-number-do-not-echo/i
 
 function defaultMarketEnvironment(directory, localOrigin) {
   const preloadPath = join(directory, 'redirect-default-market.mjs')
@@ -149,7 +152,6 @@ test('workbench CLI preserves raw stat bytes and evaluates against two public ma
     const result = await run([
       '--symbol', 'aaa',
       '--case', inputPath,
-      '--robinhood', '-',
       '--market-url', market.baseUrl.replace(/\/$/, ''),
       '--evaluated-at', NOW,
     ], JSON.stringify(robinhoodRead()))
@@ -177,7 +179,7 @@ test('workbench CLI derives ADD from a later Robinhood position page without exp
   providerRead.positionPages[1].positions[0].average_buy_price = 'provider-cost-do-not-echo'
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+      '--symbol', 'AAA', '--case', inputPath,
       '--market-url', market.baseUrl, '--evaluated-at', NOW,
     ], JSON.stringify(providerRead))
 
@@ -192,7 +194,95 @@ test('workbench CLI derives ADD from a later Robinhood position page without exp
   }
 })
 
-test('workbench CLI uses the canonical default market URL with file case and Robinhood stdin', async () => {
+test('workbench CLI maps earnings event risk to PILOT for an empty target and NO_ACTION for a holder', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-event-risk-'))
+  const input = symbolMarketCase()
+  const inputPath = writePrivateCase(directory, input)
+  const market = await startMarketServer(input)
+  const upcoming = robinhoodEarningsData({
+    results: [robinhoodEarningsResult({
+      actual: null,
+      date: '2026-08-11',
+      timing: 'pm',
+      verified: false,
+    })],
+  })
+  try {
+    for (const [name, providerRead, action] of [
+      ['empty target', robinhoodRead(), 'PILOT'],
+      ['existing holder', addRead(), 'NO_ACTION'],
+    ]) {
+      providerRead.earnings.data = structuredClone(upcoming)
+      const result = await run([
+        '--symbol', 'AAA', '--case', inputPath,
+        '--market-url', market.baseUrl, '--evaluated-at', NOW,
+      ], JSON.stringify(providerRead))
+
+      assert.equal(result.status, 0, `${name}: ${result.stderr}`)
+      const decision = JSON.parse(result.stdout)
+      assert.equal(decision.dataStatus, 'VALID', name)
+      assert.equal(decision.timingAssessment.status, 'EVENT_RISK', name)
+      assert.equal(decision.buyAction, action, name)
+      assert.doesNotMatch(result.stdout, PRIVATE_OUTPUT, name)
+    }
+  } finally {
+    await market.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('workbench CLI fails stale/session/earnings timing and RobinhoodReadV1 closed without leaking inputs', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-timing-blocked-'))
+  const input = symbolMarketCase()
+  const inputPath = writePrivateCase(directory, input)
+  const market = await startMarketServer(input)
+
+  const stale = robinhoodRead({
+    quoteBatches: [{
+      requestedSymbols: ['AAA'],
+      results: [robinhoodQuoteResult('AAA', '95', '2026-08-10T19:00:00.000Z')],
+    }],
+  })
+  const afterHoursAt = '2026-08-10T20:02:00.000Z'
+  const afterHours = robinhoodRead({
+    capturedAt: afterHoursAt,
+    quoteBatches: [{
+      requestedSymbols: ['AAA'],
+      results: [robinhoodQuoteResult('AAA', '95', '2026-08-10T20:00:00.000Z')],
+    }],
+  })
+  const unresolvedEarnings = robinhoodRead({
+    earnings: robinhoodEarningsData({ results: [], notFound: ['AAA'] }),
+  })
+  const v1 = robinhoodRead()
+  v1.schemaVersion = 1
+
+  try {
+    for (const [name, providerRead, evaluatedAt] of [
+      ['stale regular quote', stale, NOW],
+      ['closed market session', afterHours, afterHoursAt],
+      ['unresolved earnings', unresolvedEarnings, NOW],
+      ['retired V1 bundle', v1, NOW],
+    ]) {
+      const result = await run([
+        '--symbol', 'AAA', '--case', inputPath,
+        '--market-url', market.baseUrl, '--evaluated-at', evaluatedAt,
+      ], JSON.stringify(providerRead))
+
+      assert.equal(result.status, 0, `${name}: ${result.stderr}`)
+      const decision = JSON.parse(result.stdout)
+      assert.equal(decision.dataStatus, 'EVALUATION_BLOCKED', name)
+      assert.equal(decision.buyAction, 'NO_ACTION', name)
+      assert.ok(decision.blockerCodes.includes('TIMING_BLOCKED'), name)
+      assert.doesNotMatch(result.stdout, PRIVATE_OUTPUT, name)
+    }
+  } finally {
+    await market.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('workbench CLI uses the canonical default market URL with file case and implicit RobinhoodReadV2 stdin', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'factorpicks-default-market-'))
   const input = symbolMarketCase()
   const inputPath = writePrivateCase(directory, input)
@@ -201,7 +291,6 @@ test('workbench CLI uses the canonical default market URL with file case and Rob
     const result = await run([
       '--symbol', 'AAA',
       '--case', inputPath,
-      '--robinhood', '-',
       '--evaluated-at', NOW,
     ], JSON.stringify(robinhoodRead()), {
       env: defaultMarketEnvironment(directory, new URL(market.baseUrl).origin),
@@ -230,7 +319,6 @@ test('semantic market-data problems emit a blocked DecisionRecord with exit zero
     const result = await run([
       '--symbol', 'AAA',
       '--case', inputPath,
-      '--robinhood', '-',
       '--market-url', market.baseUrl,
       '--evaluated-at', NOW,
       '--ledger', ledger,
@@ -250,7 +338,7 @@ test('semantic market-data problems emit a blocked DecisionRecord with exit zero
   }
 })
 
-test('semantic collector-bundle problems emit only a blocked DecisionRecord and never persist collected input', async () => {
+test('semantic RobinhoodReadV2 problems emit only a blocked DecisionRecord and never persist provider input', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-blocked-'))
   const ledger = join(directory, 'blocked.jsonl')
   const input = symbolMarketCase()
@@ -262,7 +350,7 @@ test('semantic collector-bundle problems emit only a blocked DecisionRecord and 
   const market = await startMarketServer(input)
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+      '--symbol', 'AAA', '--case', inputPath,
       '--market-url', market.baseUrl, '--evaluated-at', NOW, '--ledger', ledger,
     ], JSON.stringify(providerRead))
 
@@ -311,7 +399,7 @@ test('HTTP failures and malicious public JSON are generic and never expose priva
   })
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+      '--symbol', 'AAA', '--case', inputPath,
       '--market-url', unavailable.baseUrl,
     ], providerInput)
     assert.equal(result.status, 1)
@@ -326,7 +414,7 @@ test('HTTP failures and malicious public JSON are generic and never expose priva
   })
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+      '--symbol', 'AAA', '--case', inputPath,
       '--market-url', malicious.baseUrl,
     ], providerInput)
     assert.equal(result.status, 1)
@@ -344,7 +432,7 @@ test('unknown, missing, malformed, and invalid top-level inputs exit one without
   const inputPath = writePrivateCase(directory, input)
   const providerInput = JSON.stringify(robinhoodRead())
   const unknown = await run([
-    '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+    '--symbol', 'AAA', '--case', inputPath,
     '--private-secret', 'argv-do-not-echo',
   ], providerInput)
   assert.equal(unknown.status, 1)
@@ -358,21 +446,21 @@ test('unknown, missing, malformed, and invalid top-level inputs exit one without
   const malformedPath = join(directory, 'malformed-case.json')
   writeFileSync(malformedPath, '{"privateSecret":"json-do-not-echo"')
   const malformed = await run([
-    '--symbol', 'AAA', '--case', malformedPath, '--robinhood', '-',
+    '--symbol', 'AAA', '--case', malformedPath,
   ], providerInput)
   assert.equal(malformed.status, 1)
   assert.match(malformed.stderr, /valid JSON/i)
   assert.doesNotMatch(malformed.stderr, /json-do-not-echo/)
 
   const malformedRobinhood = await run([
-    '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+    '--symbol', 'AAA', '--case', inputPath,
   ], '{"providerSecret":"provider-json-do-not-echo"')
   assert.equal(malformedRobinhood.status, 1)
-  assert.equal(malformedRobinhood.stderr, 'Unable to load collected portfolio input\n')
+  assert.equal(malformedRobinhood.stderr, 'Unable to load Robinhood read input\n')
   assert.doesNotMatch(malformedRobinhood.stderr, /provider-json-do-not-echo/)
 
   const invalidUrl = await run([
-    '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+    '--symbol', 'AAA', '--case', inputPath,
     '--market-url', 'file:///url-do-not-echo',
   ], providerInput)
   assert.equal(invalidUrl.status, 1)
@@ -386,7 +474,7 @@ test('unknown, missing, malformed, and invalid top-level inputs exit one without
       privateSecret: 'top-level-do-not-echo',
     })
     const invalid = await run([
-      '--symbol', 'AAA', '--case', invalidPath, '--robinhood', '-',
+      '--symbol', 'AAA', '--case', invalidPath,
       '--market-url', market.baseUrl,
     ], providerInput)
     assert.equal(invalid.status, 1)
@@ -406,7 +494,7 @@ test('ledger appends exactly one private-safe 0600 line identical to stdout', as
   const market = await startMarketServer(input)
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-', '--market-url', market.baseUrl,
+      '--symbol', 'AAA', '--case', inputPath, '--market-url', market.baseUrl,
       '--evaluated-at', NOW, '--ledger', ledger,
     ], JSON.stringify(robinhoodRead()))
 
@@ -419,7 +507,7 @@ test('ledger appends exactly one private-safe 0600 line identical to stdout', as
       /accountId|condition|response|predicate|sourceSnapshots/)
 
     const second = await run([
-      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-', '--market-url', market.baseUrl,
+      '--symbol', 'AAA', '--case', inputPath, '--market-url', market.baseUrl,
       '--evaluated-at', NOW, '--ledger', ledger,
     ], JSON.stringify(robinhoodRead()))
     assert.equal(second.status, 0, second.stderr)
@@ -453,7 +541,7 @@ test('ledger rejects a validated parent replaced by a symlink before the fd writ
   })
   try {
     const result = await run([
-      '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-', '--market-url', market.baseUrl,
+      '--symbol', 'AAA', '--case', inputPath, '--market-url', market.baseUrl,
       '--evaluated-at', NOW, '--ledger', ledger,
     ], JSON.stringify(robinhoodRead()))
 
@@ -477,7 +565,7 @@ test('ledger rejects repository, permissive, symlinked, and device paths before 
   const inputPath = writePrivateCase(directory, input)
   const market = await startMarketServer(input)
   const args = path => [
-    '--symbol', 'AAA', '--case', inputPath, '--robinhood', '-',
+    '--symbol', 'AAA', '--case', inputPath,
     '--market-url', market.baseUrl, '--ledger', path,
   ]
   try {
@@ -510,28 +598,26 @@ test('ledger rejects repository, permissive, symlinked, and device paths before 
   }
 })
 
-test('the collected portfolio bundle is required on stdin while the private case must be a file', async () => {
+test('the RobinhoodReadV2 bundle is implicit stdin while the private case must be a file', async () => {
   const input = symbolMarketCase()
   const canary = 'provider-payload-do-not-echo'
 
-  const missing = await run([
-    '--symbol', 'AAA', '--case', '/private-case-do-not-read.json',
-  ], canary)
-  assert.equal(missing.status, 1)
-  assert.match(missing.stderr, /Usage:/)
-  assert.doesNotMatch(missing.stdout + missing.stderr, new RegExp(canary))
+  const missingCase = await run(['--symbol', 'AAA'], canary)
+  assert.equal(missingCase.status, 1)
+  assert.match(missingCase.stderr, /Usage:/)
+  assert.doesNotMatch(missingCase.stdout + missingCase.stderr, new RegExp(canary))
 
   const caseStdin = await run([
-    '--symbol', 'AAA', '--case', '-', '--robinhood', '-',
+    '--symbol', 'AAA', '--case', '-',
   ], canary)
   assert.equal(caseStdin.status, 1)
   assert.match(caseStdin.stderr, /Usage:/)
   assert.doesNotMatch(caseStdin.stdout + caseStdin.stderr, new RegExp(canary))
 
-  const robinhoodPath = await run([
+  const retiredRobinhoodFlag = await run([
     '--symbol', 'AAA', '--case', '/private-case-do-not-read.json',
     '--robinhood', '/provider-payload-do-not-read.json',
   ], JSON.stringify(input.privateCase))
-  assert.equal(robinhoodPath.status, 1)
-  assert.match(robinhoodPath.stderr, /Usage:/)
+  assert.equal(retiredRobinhoodFlag.status, 1)
+  assert.match(retiredRobinhoodFlag.stderr, /Usage:/)
 })

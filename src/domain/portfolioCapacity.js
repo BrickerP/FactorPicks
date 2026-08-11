@@ -11,6 +11,8 @@ import {
 } from './contentAddressing.js'
 
 const TICKER_PATTERN = /^[A-Z][A-Z0-9.-]{0,9}$/
+const RFC3339_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/
+const NANOSECONDS_PER_MILLISECOND = 1_000_000n
 const HARD_LIMIT_KEYS = [
   'userHardLimit',
   'systemRiskLimit',
@@ -45,7 +47,27 @@ function isTicker(value) {
 }
 
 function isTimestamp(value) {
-  return isNonEmptyString(value) && Number.isFinite(Date.parse(value))
+  return epochNanoseconds(value) !== null
+}
+
+function epochNanoseconds(value) {
+  if (!isNonEmptyString(value)) return null
+  const match = RFC3339_PATTERN.exec(value)
+  if (!match) return null
+  const local = new Date(`${match[1]}.000Z`)
+  if (!Number.isFinite(local.getTime()) || local.toISOString().slice(0, 19) !== match[1]) return null
+  if (match[3] !== 'Z') {
+    const [hours, minutes] = match[3].slice(1).split(':').map(Number)
+    if (hours > 23 || minutes > 59) return null
+  }
+  const fraction = match[2] ?? ''
+  const milliseconds = fraction.slice(0, 3).padEnd(3, '0')
+  const parsed = Date.parse(`${match[1]}.${milliseconds}${match[3]}`)
+  if (!Number.isFinite(parsed)) return null
+  const fractionNanoseconds = BigInt(fraction.padEnd(9, '0') || '0')
+  const parsedMilliseconds = BigInt(milliseconds) * NANOSECONDS_PER_MILLISECOND
+  return BigInt(parsed) * NANOSECONDS_PER_MILLISECOND +
+    fractionNanoseconds - parsedMilliseconds
 }
 
 
@@ -60,11 +82,15 @@ function hasOnlyKeys(value, keys) {
 
 
 function validateFreshness(asOf, evaluatedAt, maxAgeMs, maxFutureSkewMs) {
-  if (!isTimestamp(asOf) || !isTimestamp(evaluatedAt) ||
+  const asOfNanoseconds = epochNanoseconds(asOf)
+  const evaluatedNanoseconds = epochNanoseconds(evaluatedAt)
+  if (asOfNanoseconds === null || evaluatedNanoseconds === null ||
       !Number.isFinite(maxAgeMs) || maxAgeMs < 0 ||
       !Number.isFinite(maxFutureSkewMs) || maxFutureSkewMs < 0) failInput()
-  const ageMs = Date.parse(evaluatedAt) - Date.parse(asOf)
-  if (ageMs > maxAgeMs || ageMs < -maxFutureSkewMs) failInput()
+  const age = evaluatedNanoseconds - asOfNanoseconds
+  const maxAge = BigInt(Math.round(maxAgeMs * 1_000_000))
+  const maxFutureSkew = BigInt(Math.round(maxFutureSkewMs * 1_000_000))
+  if (age > maxAge || age < -maxFutureSkew) failInput()
 }
 
 function computeCapacityMetrics(portfolioFacts, policyFacts) {
@@ -279,11 +305,17 @@ export function derivePortfolioCapacitySnapshot(input) {
     if (!isObject(position) || !isTicker(position.symbol) ||
         !Number.isFinite(position.quantity) || position.quantity <= 0 ||
         !Number.isFinite(position.markPrice) || position.markPrice <= 0 ||
-        position.asOf !== portfolio.asOf || position.currency !== 'USD' ||
+        !isTimestamp(position.asOf) || position.currency !== 'USD' ||
         position.assetType !== 'EQUITY' || position.side !== 'LONG' ||
         !isNonEmptyString(position.sector) || !isNonEmptyString(position.industry)) {
       failInput()
     }
+    validateFreshness(
+      position.asOf,
+      evaluatedAt,
+      freshnessPolicy.maxPortfolioAgeMs,
+      freshnessPolicy.maxFutureSkewMs,
+    )
     const existing = positionsBySymbol.get(position.symbol)
     if (existing &&
         (existing.sector !== position.sector || existing.industry !== position.industry)) {

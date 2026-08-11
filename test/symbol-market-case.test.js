@@ -9,6 +9,12 @@ import {
   STAT_ARTIFACT_VECTORS,
   symbolMarketCase,
 } from './fixtures/symbol-market-case-fixture.js'
+import {
+  robinhoodEarningsData,
+  robinhoodEarningsResult,
+  robinhoodQuoteResult,
+  robinhoodRead,
+} from './fixtures/robinhood-read-fixture.js'
 
 function assertBlocked(result) {
   assert.equal(result.dataStatus, 'EVALUATION_BLOCKED')
@@ -47,7 +53,7 @@ test('evaluates a canonical symbol case through the DecisionRecordV2 seam', () =
     decidedAt: NOW,
     dataStatus: 'VALID',
     buyAction: 'OPEN',
-    price: { value: 95, currency: 'USD', asOf: NOW },
+    price: { value: 95, currency: 'USD', asOf: AS_OF },
   })
 })
 
@@ -61,7 +67,7 @@ test('normalizes the symbol before selecting its universe row', () => {
   assert.equal(result.dataStatus, 'VALID')
 })
 
-test('missing or invalid market rows fail closed through the workbench', () => {
+test('missing research rows block while Yahoo Close is not a timing authority', () => {
   const missing = useArtifact(symbolMarketCase(), STAT_ARTIFACT_VECTORS.missingAaa)
   missing.qualityManifest.requested = 1
   missing.qualityManifest.succeeded = 1
@@ -72,26 +78,31 @@ test('missing or invalid market rows fail closed through the workbench', () => {
   assertBlocked(evaluateSymbolCase(missing))
 
   const invalid = useArtifact(symbolMarketCase(), STAT_ARTIFACT_VECTORS.invalidPrice)
-  assertBlocked(evaluateSymbolCase(invalid))
+  const result = evaluateSymbolCase(invalid)
+  assert.equal(result.dataStatus, 'VALID')
+  assert.equal(result.evaluatedPrice.value, 95)
+  assert.equal(result.evaluatedPrice.asOf, AS_OF)
 })
 
-test('non-canonical row times fail closed without a market-price fallback', () => {
+test('Yahoo row timestamps never replace or invalidate the Robinhood quote', () => {
   for (const vector of [
     STAT_ARTIFACT_VECTORS.invalidAsOf,
     STAT_ARTIFACT_VECTORS.lowercaseObservedAt,
     STAT_ARTIFACT_VECTORS.spacedAsOf,
   ]) {
     const result = evaluateSymbolCase(useArtifact(symbolMarketCase(), vector))
-    assertBlocked(result)
-    assert.equal(result.evaluatedPrice, null)
+    assert.equal(result.dataStatus, 'VALID')
+    assert.equal(result.evaluatedPrice.value, 95)
+    assert.equal(result.evaluatedPrice.asOf, AS_OF)
   }
 })
 
-test('future and stale market times remain semantic workbench blocks', () => {
+test('future and stale Yahoo row times remain research-only metadata', () => {
   for (const vector of [STAT_ARTIFACT_VECTORS.future, STAT_ARTIFACT_VECTORS.stale]) {
     const result = evaluateSymbolCase(useArtifact(symbolMarketCase(), vector))
-    assertBlocked(result)
-    assert.equal(result.evaluatedPrice, null)
+    assert.equal(result.dataStatus, 'VALID')
+    assert.equal(result.evaluatedPrice.value, 95)
+    assert.equal(result.evaluatedPrice.asOf, AS_OF)
   }
 })
 
@@ -161,7 +172,7 @@ test('rejects any private draft occupying the adapter price namespace', () => {
   assert.throws(() => evaluateSymbolCase(reservedKey), /Symbol case input is invalid/)
 })
 
-test('non-authoritative private price-like facts never replace the public price', () => {
+test('non-authoritative private price-like facts never replace the Robinhood price', () => {
   const sourceOnly = symbolMarketCase()
   const privatePrice = createSnapshot('source', {
     role: 'SOURCE', kind: 'SEC_FILING', schemaVersion: 1, symbol: 'AAA',
@@ -225,7 +236,8 @@ test('binds the exact UTF-8 stat artifact bytes to the quality manifest', () => 
   tamperedArtifact.statArtifact = tamperedArtifact.statArtifact.replace('"Close":95', '"Close":96')
   const tamperedResult = evaluateSymbolCase(tamperedArtifact)
   assertBlocked(tamperedResult)
-  assert.equal(tamperedResult.evaluatedPrice, null)
+  assert.equal(tamperedResult.evaluatedPrice.value, 95)
+  assert.equal(tamperedResult.evaluatedPrice.asOf, AS_OF)
 
   const mixedGeneration = symbolMarketCase()
   mixedGeneration.qualityManifest.statArtifact = {
@@ -233,7 +245,8 @@ test('binds the exact UTF-8 stat artifact bytes to the quality manifest', () => 
   }
   const mixedResult = evaluateSymbolCase(mixedGeneration)
   assertBlocked(mixedResult)
-  assert.equal(mixedResult.evaluatedPrice, null)
+  assert.equal(mixedResult.evaluatedPrice.value, 95)
+  assert.equal(mixedResult.evaluatedPrice.asOf, AS_OF)
 })
 
 test('requires artifact symbols, manifest success count, and parsed rows to agree', () => {
@@ -250,7 +263,7 @@ test('requires artifact symbols, manifest success count, and parsed rows to agre
   assertBlocked(evaluateSymbolCase(nonCanonicalContract))
 })
 
-test('requires canonical evaluatedAt and USD row currency', () => {
+test('requires canonical evaluatedAt while Yahoo currency cannot become quote currency', () => {
   for (const evaluatedAt of [
     '2026-02-30T08:00:00.000Z',
     '2026-08-10T08:00:00.000z',
@@ -267,8 +280,9 @@ test('requires canonical evaluatedAt and USD row currency', () => {
     symbolMarketCase(),
     STAT_ARTIFACT_VECTORS.nonUsd,
   ))
-  assertBlocked(nonUsd)
-  assert.equal(nonUsd.evaluatedPrice, null)
+  assert.equal(nonUsd.dataStatus, 'VALID')
+  assert.equal(nonUsd.evaluatedPrice.currency, 'USD')
+  assert.equal(nonUsd.evaluatedPrice.value, 95)
 })
 
 test('does not mutate private source snapshots or evidence drafts', () => {
@@ -305,9 +319,84 @@ test('rejects unknown and derived input aliases at the public seam', () => {
   assert.throws(() => evaluateSymbolCase(legacyParsedStat), /Symbol case input is invalid/)
 })
 
-test('rejects a private policy that promotes Yahoo market data above secondary', () => {
+test('rejects private ownership of the Robinhood machine source namespace', () => {
   const input = symbolMarketCase()
-  input.privateCase.evidence.sourcePolicy.kinds.YAHOO_MARKET_DATA = 'PRIMARY'
+  input.privateCase.evidence.sourcePolicy.kinds.ROBINHOOD_EQUITY_QUOTE = 'PRIMARY'
 
   assert.throws(() => evaluateSymbolCase(input), /Symbol case input is invalid/)
+})
+
+test('rejects private market-session and earnings-schedule machine facts', () => {
+  for (const factKey of ['MARKET_SESSION', 'EARNINGS_SCHEDULE_KNOWN', 'NEXT_EARNINGS_AT']) {
+    const input = symbolMarketCase()
+    const privateSource = createSnapshot('source', {
+      role: 'SOURCE', kind: 'SEC_FILING', schemaVersion: 1, symbol: 'AAA',
+      currency: 'USD', asOf: AS_OF, observedAt: AS_OF,
+      facts: [{ factKey, value: true, asOf: AS_OF, scope: { symbol: 'AAA' } }],
+    })
+    input.privateCase.sourceSnapshots.push(privateSource.resolved)
+    assert.throws(() => evaluateSymbolCase(input), /Symbol case input is invalid/)
+  }
+})
+
+test('malformed Robinhood V2 data fails closed instead of falling back to Yahoo Close', () => {
+  const read = robinhoodRead()
+  delete read.earnings
+  const result = evaluateSymbolCase(symbolMarketCase({ robinhoodRead: read }))
+
+  assertBlocked(result)
+  assert.equal(result.evaluatedPrice, null)
+  assert.ok(result.blockerCodes.includes('INVALID_PORTFOLIO_CAPACITY'))
+})
+
+test('derives earnings risk, RTH, and freshness only from Robinhood machine evidence', () => {
+  const withUpcoming = date => robinhoodRead({
+    earnings: robinhoodEarningsData({ results: [
+      robinhoodEarningsResult(),
+      robinhoodEarningsResult({
+        quarter: 3,
+        actual: null,
+        date,
+        timing: 'am',
+        verified: false,
+      }),
+    ] }),
+  })
+  assert.equal(evaluateSymbolCase(symbolMarketCase({
+    robinhoodRead: withUpcoming('2026-08-17'),
+  })).buyAction, 'PILOT')
+  assert.equal(evaluateSymbolCase(symbolMarketCase({
+    robinhoodRead: withUpcoming('2026-08-18'),
+  })).buyAction, 'OPEN')
+
+  const extendedQuote = robinhoodQuoteResult('AAA')
+  extendedQuote.quote.last_non_reg_trade_price = '96'
+  extendedQuote.quote.venue_last_non_reg_trade_time = '2026-08-10T20:01:00.000Z'
+  const extended = robinhoodRead({
+    quoteBatches: [{ requestedSymbols: ['AAA'], results: [extendedQuote] }],
+  })
+  assertBlocked(evaluateSymbolCase(symbolMarketCase({ robinhoodRead: extended })))
+
+  for (const asOf of ['2026-08-10T19:40:00.000Z', '2026-08-10T20:01:00.001Z']) {
+    const quote = robinhoodQuoteResult('AAA', '95', asOf)
+    const read = robinhoodRead({
+      quoteBatches: [{ requestedSymbols: ['AAA'], results: [quote] }],
+    })
+    assertBlocked(evaluateSymbolCase(symbolMarketCase({ robinhoodRead: read })))
+  }
+
+  assertBlocked(evaluateSymbolCase(symbolMarketCase({
+    evaluatedAt: '2026-08-10T20:02:00.000Z',
+  })))
+})
+
+test('future actual Robinhood earnings fail closed through the public workbench seam', () => {
+  const input = symbolMarketCase({
+    robinhoodRead: robinhoodRead({
+      earnings: robinhoodEarningsData({ results: [
+        robinhoodEarningsResult({ actual: 1.2, date: '2026-08-11' }),
+      ] }),
+    }),
+  })
+  assertBlocked(evaluateSymbolCase(input))
 })
