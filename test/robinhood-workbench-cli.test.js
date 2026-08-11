@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import {
+  chmodSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -16,11 +17,11 @@ import { NOW, symbolMarketCase } from './fixtures/symbol-market-case-fixture.js'
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SCRIPT = join(ROOT, 'scripts/evaluate-workbench.js')
 
-function run(args, input, options = {}) {
+function run(args, input) {
   return new Promise((resolve, reject) => {
     const child = spawn('node', [SCRIPT, ...args], {
-      cwd: options.cwd ?? ROOT,
-      env: { ...process.env, ...options.env },
+      cwd: ROOT,
+      env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -35,29 +36,33 @@ function run(args, input, options = {}) {
   })
 }
 
+function writeCases(directory) {
+  const input = symbolMarketCase()
+  const path = join(directory, 'cases.json')
+  writeFileSync(path, JSON.stringify({
+    schemaVersion: 1,
+    candidates: [{ symbol: 'AAA', privateCase: input.privateCase }],
+  }), { mode: 0o600 })
+  chmodSync(path, 0o600)
+  return { input, path }
+}
+
 async function startMarketServer(input) {
   const requests = []
   const server = createServer((request, response) => {
-    let body = ''
-    request.setEncoding('utf8')
-    request.on('data', chunk => { body += chunk })
-    request.on('end', () => {
-      requests.push({ method: request.method, url: request.url, body })
-      if (request.url.endsWith('/stat.json')) {
-        response.statusCode = 200
-        response.setHeader('content-type', 'application/json')
-        response.end(input.statArtifact)
-        return
-      }
-      if (request.url.endsWith('/data-quality.json')) {
-        response.statusCode = 200
-        response.setHeader('content-type', 'application/json')
-        response.end(JSON.stringify(input.qualityManifest))
-        return
-      }
-      response.statusCode = 404
-      response.end('not found')
-    })
+    requests.push({ method: request.method, url: request.url })
+    if (request.url.endsWith('/stat.json')) {
+      response.statusCode = 200
+      response.end(input.statArtifact)
+      return
+    }
+    if (request.url.endsWith('/data-quality.json')) {
+      response.statusCode = 200
+      response.end(JSON.stringify(input.qualityManifest))
+      return
+    }
+    response.statusCode = 404
+    response.end('not found')
   })
   await new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -73,87 +78,25 @@ async function startMarketServer(input) {
   }
 }
 
-function writePrivateCase(directory) {
-  const input = symbolMarketCase()
-  const casePath = join(directory, 'private-case.json')
-  writeFileSync(casePath, JSON.stringify(input.privateCase))
-  return { input, casePath }
-}
-
-function baseArgs(casePath, marketUrl) {
+function baseArgs(casesPath, marketUrl) {
   return [
-    '--symbol', 'AAA',
-    '--case', casePath,
+    '--cases', casesPath,
     '--market-url', marketUrl,
     '--evaluated-at', NOW,
   ]
 }
 
-test('reports RobinhoodReadV2 stdin transport failures generically while the private case is a file', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-file-case-'))
-  const { input, casePath } = writePrivateCase(directory)
+test('reports missing and malformed RobinhoodReadV3 stdin generically before public I/O', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-batch-provider-'))
+  const { input, path } = writeCases(directory)
   const market = await startMarketServer(input)
   try {
-    const providerCanary = '{"providerSecret":"robinhood-provider-canary"'
-    const result = await run(baseArgs(casePath, market.baseUrl), providerCanary)
-
-    assert.equal(result.status, 1)
-    assert.doesNotMatch(result.stderr, /Usage:/)
-    assert.equal(result.stderr, 'Unable to load Robinhood read input\n')
-    assert.doesNotMatch(result.stderr, /robinhood-provider-canary/)
-    assert.equal(result.stdout, '')
-    assert.equal(market.requests.length, 0)
-
-    const missingCollection = await run(baseArgs(casePath, market.baseUrl), '')
-    assert.equal(missingCollection.status, 1)
-    assert.equal(missingCollection.stderr, 'Unable to load Robinhood read input\n')
-    assert.equal(missingCollection.stdout, '')
-    assert.equal(market.requests.length, 0)
-  } finally {
-    await market.close()
-    rmSync(directory, { recursive: true, force: true })
-  }
-})
-
-test('rejects --case - before consuming implicit RobinhoodReadV2 stdin or fetching public market data', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-case-stdin-'))
-  const { input } = writePrivateCase(directory)
-  const market = await startMarketServer(input)
-  try {
-    const providerCanary = '{"providerSecret":"case-stdin-canary"}'
-    const result = await run([
-      '--symbol', 'AAA', '--case', '-',
-      '--market-url', market.baseUrl, '--evaluated-at', NOW,
-    ], providerCanary)
-
-    assert.equal(result.status, 1)
-    assert.match(result.stderr, /Usage:/)
-    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /case-stdin-canary/)
-    assert.equal(market.requests.length, 0)
-  } finally {
-    await market.close()
-    rmSync(directory, { recursive: true, force: true })
-  }
-})
-
-test('rejects the retired --robinhood flag before implicit stdin or network access', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-arg-'))
-  const { input, casePath } = writePrivateCase(directory)
-  const market = await startMarketServer(input)
-  try {
-    const scenarios = [
-      ['stdin sentinel', [...baseArgs(casePath, market.baseUrl), '--robinhood', '-']],
-      ['provider file path', [
-        ...baseArgs(casePath, market.baseUrl),
-        '--robinhood', join(directory, 'robinhood.json'),
-      ]],
-      ['provider flag without value', [...baseArgs(casePath, market.baseUrl), '--robinhood']],
-    ]
-    for (const [name, args] of scenarios) {
-      const result = await run(args, '{"providerSecret":"arg-canary"}')
-      assert.equal(result.status, 1, name)
-      assert.match(result.stderr, /Usage:/, name)
-      assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /arg-canary/, name)
+    for (const providerInput of ['', '{"provider-canary":', '[]']) {
+      const result = await run(baseArgs(path, market.baseUrl), providerInput)
+      assert.equal(result.status, 1)
+      assert.equal(result.stdout, '')
+      assert.equal(result.stderr, 'Unable to load Robinhood read input\n')
+      assert.doesNotMatch(result.stderr, /provider-canary/)
     }
     assert.equal(market.requests.length, 0)
   } finally {
@@ -162,25 +105,73 @@ test('rejects the retired --robinhood flag before implicit stdin or network acce
   }
 })
 
-test('rejects unknown and trading flags before consuming provider input or fetching market data', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-robinhood-trade-flags-'))
-  const { input, casePath } = writePrivateCase(directory)
+test('requires a named --cases file and rejects stdin cases before provider or network access', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-batch-cases-arg-'))
+  const { input } = writeCases(directory)
   const market = await startMarketServer(input)
   try {
-    const scenarios = [
-      ['unknown', '--mystery', 'unknown-flag-canary'],
-      ['order', '--order', 'OPEN'],
-      ['action', '--action', 'BUY'],
-      ['quantity', '--quantity', '1'],
-      ['cancel', '--cancel'],
-    ]
+    for (const args of [
+      ['--evaluated-at', NOW],
+      ['--cases', '-'],
+      ['--cases'],
+    ]) {
+      const result = await run(args, 'provider-canary')
+      assert.equal(result.status, 1)
+      assert.match(result.stderr, /Usage:/)
+      assert.equal(result.stdout, '')
+      assert.doesNotMatch(result.stderr, /provider-canary/)
+    }
+    assert.equal(market.requests.length, 0)
+  } finally {
+    await market.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('rejects retired single-symbol and Robinhood flags before reading files, stdin, or network', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-batch-retired-flags-'))
+  const { input, path } = writeCases(directory)
+  const market = await startMarketServer(input)
+  const scenarios = [
+    ['symbol', '--symbol', 'AAA'],
+    ['case', '--case', path],
+    ['robinhood', '--robinhood', '-'],
+  ]
+  try {
     for (const [name, ...flag] of scenarios) {
-      const args = [...baseArgs(casePath, market.baseUrl)]
-      args.splice(4, 0, ...flag)
-      const result = await run(args, '{"providerSecret":"trade-stdin-canary"}')
+      const result = await run([...baseArgs(path, market.baseUrl), ...flag],
+        'provider-canary')
       assert.equal(result.status, 1, name)
       assert.match(result.stderr, /Usage:/, name)
-      assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /trade-stdin-canary|unknown-flag-canary/, name)
+      assert.equal(result.stdout, '', name)
+      assert.doesNotMatch(result.stderr, /provider-canary/, name)
+    }
+    assert.equal(market.requests.length, 0)
+  } finally {
+    await market.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('rejects unknown and trading flags before cases, provider input, or public I/O', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'factorpicks-batch-trading-flags-'))
+  const { input, path } = writeCases(directory)
+  const market = await startMarketServer(input)
+  const scenarios = [
+    ['unknown', '--mystery', 'unknown-flag-canary'],
+    ['order', '--order', 'OPEN'],
+    ['action', '--action', 'BUY'],
+    ['quantity', '--quantity', '1'],
+    ['cancel', '--cancel'],
+  ]
+  try {
+    for (const [name, ...flag] of scenarios) {
+      const result = await run([...baseArgs(path, market.baseUrl), ...flag],
+        'provider-canary')
+      assert.equal(result.status, 1, name)
+      assert.match(result.stderr, /Usage:/, name)
+      assert.equal(result.stdout, '', name)
+      assert.doesNotMatch(result.stderr, /provider-canary|unknown-flag-canary/, name)
     }
     assert.equal(market.requests.length, 0)
   } finally {

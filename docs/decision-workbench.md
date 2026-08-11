@@ -4,26 +4,36 @@ This document is the current non-UI contract for FactorPicks. The sole local
 entry point is:
 
 ```bash
-npm run workbench -- --symbol AAPL --case private-case.json \
+npm run workbench -- --cases /external/private/candidate-cases.json \
   [--market-url https://brickerp.github.io/FactorPicks/] \
-  [--evaluated-at 2026-08-10T08:00:00.000Z] \
+  [--evaluated-at 2026-08-10T20:00:00.000Z] \
   [--ledger /external/private/decisions.jsonl]
 ```
 
-The CLI reads the private case only from the named local file and reads one
-canonical `RobinhoodReadV2` collector bundle of allow-listed normalized
-projections implicitly from stdin. `--case -`, the retired `--robinhood` flag,
-and every unknown or trading parameter are rejected before stdin or network
-access. The invoking Codex runtime must pipe the collector result and close
-stdin; plain interactive invocation without a pipe intentionally waits for its
-only private provider input.
-It then makes exactly two public, bodyless requests: `GET <base>/stat.json` and
+The CLI reads one exact private batch file and one canonical `RobinhoodReadV3`
+from stdin. The cases file is:
+
+```text
+CandidateCasesV1 {
+  schemaVersion: 1,
+  candidates: [{ symbol, privateCase }]
+}
+```
+
+The file must be outside the repository, regular, and exactly `0400` or `0600`.
+The final path and every ancestor must not be a symlink. The CLI validates the
+canonical parent and target, opens with `O_RDONLY | O_NOFOLLOW`, verifies the
+opened device/inode/mode against the final path, reads once from that descriptor,
+then repeats the parent/path/device/inode verification. A path swap is a hard
+error. Canonical duplicate candidates are rejected before stdin, network, or
+ledger work. `--symbol`, `--case`, `--robinhood`, V2, unknown parameters, and
+trading parameters are rejected rather than retained as compatibility paths.
+
+After the private inputs are structurally valid, the CLI makes exactly two
+public bodyless requests for the entire batch: one `GET <base>/stat.json` and one
 `GET <base>/data-quality.json`. The default base is
-`https://brickerp.github.io/FactorPicks/`. No private case value is sent in a
-request, and the path has no direct broker HTTP/auth, order, or public UI capability.
-It may append the sanitized `DecisionRecordV2` to an external private ledger.
-Identity verification establishes byte integrity and provenance binding, not
-external-source authenticity.
+`https://brickerp.github.io/FactorPicks/`. No private value enters a request.
+The path has no direct broker HTTP/auth, order, or public UI capability.
 
 The CLI retains `stat.json` as the exact UTF-8 response text. It may parse that
 text only to validate its top-level JSON shape; it must not stringify the parsed
@@ -36,21 +46,18 @@ semantic blocker, never a fallback to an unbound market object.
 The stage order is fixed:
 
 ```text
-public stat + quality manifest + private case + RobinhoodReadV2 collector bundle
-  → evaluateSymbolCase
-  → evaluateResearch
-  → deriveRobinhoodInputs
-  → deriveEvidenceBundle
-  → deriveStructuredUnderwriting
-  → deriveTimingAssessment
-  → derivePortfolioCapacitySnapshot
-  → evaluateDecision
+CandidateCasesV1 + public stat/quality + RobinhoodReadV3
+  → evaluateCandidateBatch
+  → canonicalize symbols, reject duplicates, validate exact V3 target set
+  → evaluateSymbolCase once per sorted candidate
+  → DecisionRecordV2[] sorted by symbol
 ```
 
-The private case accepts exactly `schemaVersion`, `researchPolicy`,
+Each private case accepts exactly `schemaVersion`, `researchPolicy`,
 `sourceSnapshots`, `evidence`, `underwriting`, `timing`, `capacityPolicy`, and
-`decisionPolicy`. Symbol and evaluation time are CLI values. The public universe
-and quality manifest come only from the two public responses. A private case
+`decisionPolicy`. Its symbol comes from the candidate envelope; evaluation time
+is one CLI value shared by the batch. The public universe and quality manifest
+come only from the two public responses. A private case
 must not reintroduce `research`, occupy the reserved current-price Evidence
 namespace, occupy the machine session/earnings namespaces, or provide derived
 Evidence, valuation/entry output, timing status, capacity snapshot, sizing, or
@@ -61,7 +68,7 @@ fixed inside the projector.
 Only after the raw artifact and manifest agree does the adapter select a public
 row for research and sector/industry classification. Yahoo `Close` is not a
 real-time price authority and is never promoted to `CURRENT_PRICE`.
-`deriveRobinhoodInputs` validates that the V2 target equals the CLI symbol, then
+`deriveRobinhoodInputs` projects the corresponding V3 target, then
 creates the only machine quote candidate, its `REGULAR`/`EXTENDED` session fact,
 and earnings sources and Evidence. `deriveTimingAssessment` is the sole
 freshness/session authority and permits only one fresh, active, traded
@@ -75,12 +82,12 @@ prices, and other price-like facts may remain ordinary Evidence under distinct
 keys, claims, and fact keys, but cannot become `evaluatedPrice`. The adapter does
 not infer missing quote, thesis, valuation, entry range, timing state, account
 capacity, personal limits, policy, or action from ranks or neighboring symbols.
-Missing, stale, conflicting, or wrong-symbol semantic data returns
-`EVALUATION_BLOCKED` + `NO_ACTION` with exit zero. Invalid argv, private-case
-JSON/top-level shape, V2 stdin transport/JSON or missing collection,
-public HTTP/non-object JSON, URL, or file I/O exits one with generalized stderr.
-A parsed but semantically invalid collector bundle is a domain blocker and also
-returns `EVALUATION_BLOCKED` + `NO_ACTION` with exit zero.
+Missing, stale, conflicting, or unavailable target data is isolated to its
+candidate as `EVALUATION_BLOCKED` + `NO_ACTION`; the array still exits zero.
+Invalid argv, cases JSON/shape/path, canonical duplicates, malformed/missing
+stdin, V2, V3 target-set mismatch, invalid private-case structure, public
+HTTP/non-object JSON, URL, or file I/O is a global exit-one error with no stdout
+or ledger append.
 
 Evidence timestamps are derived from resolved source facts and inference
 parents. Freshness is rechecked at each downstream boundary with
@@ -90,8 +97,8 @@ override it.
 
 Downstream freshness applies to every Evidence item's `asOf` and `observedAt`,
 using the stricter of the Evidence policy and DecisionPolicy age/skew limits.
-Invalid market/timing input has no partial/raw fallback in a blocked record: its public
-projection is `null`.
+Invalid market/timing input has no partial/raw fallback in a blocked record: its
+public projection is `null`.
 
 ## Product goal and action language
 
@@ -138,7 +145,7 @@ Private state begins with the `Underwriting Case` and includes its evidence inte
 
 The plain Node workbench has no MCP authentication and does not contact
 Robinhood. The Codex runtime binds
-`collectRobinhoodRead({selectedAccountNumber, targetSymbol, capturedAt, client})`
+`collectRobinhoodRead({selectedAccountNumber, targetSymbols, client, clock?})`
 to an authenticated client. The injected client exposes exactly `getAccounts`,
 `getPortfolio`, `getEquityPositions`, `getEquityQuotes`, and
 `getEarningsResults`, corresponding to the MCP read allowlist `get_accounts`,
@@ -146,34 +153,36 @@ to an authenticated client. The injected client exposes exactly `getAccounts`,
 `get_earnings_results`. Their calls are fixed to `getAccounts()`,
 `getPortfolio({accountNumber})`,
 `getEquityPositions({accountNumber, cursor?})`, and
-`getEquityQuotes({symbols})`, plus `getEarningsResults({symbol: targetSymbol})`.
+`getEquityQuotes({symbols})`, plus one
+`getEarningsResults({symbol})` call per target.
 The collector explicitly selects one account, follows every position page,
-obtains one de-duplicated quote set for `targetSymbol ∪ heldSymbols` in batches
-of at most 20, obtains earnings for the target only, and returns only allow-listed
-normalized projections. MCP transport responses are not the collector bundle
-and never enter the Node CLI. No order, cancel, review-order, watchlist mutation,
-retry, cache, fallback, or second market collector is allowed.
+obtains the sorted de-duplicated `targetSymbols ∪ heldSymbols` quote set in
+batches of at most 20, obtains earnings for every target, and returns only
+allow-listed normalized projections. MCP transport responses are not the
+collector bundle and never enter the Node CLI. No order, cancel, review-order,
+watchlist mutation, retry, cache, fallback, or second market collector is
+allowed.
 
 The stdin bundle is exact and versioned:
 
 ```text
-RobinhoodReadV2 {
-  schemaVersion: 2,
+RobinhoodReadV3 {
+  schemaVersion: 3,
   capturedAt,
-  targetSymbol,
+  targetSymbols,
   selectedAccountNumber,
   accounts,
   portfolio: { accountNumber, data },
   positionPages,
-  quoteBatches,
-  earnings: { symbol, data: { not_found, results } }
+  quoteBatches: [{ requestedSymbols, observedAt, results }],
+  earnings: [{ symbol, observedAt, data: { not_found, results } }]
 }
 ```
 
 The normalized collector bundle exists only in the collector and CLI process
 memory. It is never written to a temporary file, case file, ledger, cache,
 stdout, stderr, or public artifact. The ledger contains only the emitted
-`DecisionRecordV2`.
+`DecisionRecordV2[]` line.
 Account number/`selectedAccountNumber`, NLV/`total_value`, `quantity`,
 raw quote envelopes, bid/ask, non-selected trade/close fields, raw earnings
 estimates/results,
@@ -459,24 +468,24 @@ The gate-to-action mapping is deterministic:
 | All gates `PASS`, target above current | `OPEN` | `ADD` | `NONE` |
 | All gates `PASS`, no additional capacity | `NO_ACTION` | `NO_ACTION` | `NONE` |
 
-## Symbol-case orchestration
+## Batch orchestration
 
 The public producer publishes a coherent `stat.json` and `data-quality.json`
-pair before a request. For one invocation, the CLI:
+pair before a request. For one batch invocation, the CLI:
 
-1. validates argv and the optional ledger path before reading stdin or making a
-   request, then reads the private case file and one normalized
-   `RobinhoodReadV2` collector bundle implicitly from stdin;
-2. reads each public file once from one base URL using `GET` without a body,
+1. validates argv, opens and reads the verified cases descriptor once, rejects
+   canonical duplicates, validates the optional ledger path, and rejects any
+   path or hard link that gives cases and ledger the same device/inode identity;
+2. reads one normalized `RobinhoodReadV3` bundle implicitly from stdin;
+3. reads each public file once from one base URL using `GET` without a body,
    preserving the `stat.json` response text byte-for-byte;
-3. verifies the manifest's raw-artifact hash/bytes/symbol counts, then selects
-   the canonicalized symbol row for research and classification only;
-4. projects the complete Robinhood read into the sole current quote,
-   regular-session, earnings, and portfolio facts for the same target, without
-   accepting caller-supplied machine timing, capacity, or action fields;
-5. combines only the public research inputs with the explicit private sections;
-6. evaluates the fixed domain stages and emits one sanitized `DecisionRecordV2`;
-7. when requested, appends that exact stdout record once to the external ledger.
+4. calls `evaluateCandidateBatch` once, which validates that sorted V3 targets
+   exactly equal the canonical candidate set before evaluating any candidate;
+5. evaluates each candidate through the sole `evaluateSymbolCase` seam, while a
+   missing target-only quote or earnings result remains isolated to that record;
+6. emits one symbol-sorted sanitized `DecisionRecordV2[]` JSON line;
+7. when requested, appends that exact serialized array line once to the external
+   ledger.
 
 The CLI does not refresh an account, place an order, call a broker, write public
 data, or mutate a UI. It never falls back to an official close, Yahoo price,
@@ -493,9 +502,27 @@ must not duplicate either decision.
 
 The public pipeline may be cached, reviewed, and published without an account identity. Private inputs are kept outside public artifacts and repository history, with access limited to the investor's decision context; request URLs, bodies, headers, stderr, logs, and evidence references must not contain credentials or raw account secrets.
 
-`PrivateLedger` stores only derived weights, action/risk outcomes, policy references, and snapshot/evidence references or digests. It does not store raw NLV, quantity, market value, account ID, or the normalized collector bundle. Collector-bundle persistence is not part of this contract. The private `SnapshotStore` is encrypted, content-addressed, and immutable; its retention cannot end before any referencing decision record, and deletion requires no remaining references.
+`PrivateLedger` stores only arrays of derived weights, action/risk outcomes,
+policy references, and snapshot/evidence references or digests. It does not
+store raw NLV, quantity, market value, account ID, cases, or the normalized
+collector bundle. Provider-input persistence is not part of this contract. The
+private `SnapshotStore` is encrypted, content-addressed, and immutable; its
+retention cannot end before any referencing decision record, and deletion
+requires no remaining references.
 
-The workbench is decision support only. It may read and normalize holdings, evaluate policy, and write a private `DecisionRecordV2`; it must not submit, schedule, amend, cancel, or simulate a broker order as if it had executed. Any future execution requires a separate, explicit, human-authorized system at the `Execution Boundary`. If `--ledger` is used, the target must be an external owner-only (`0600`) regular file; symlinked targets/parents, repository paths, devices, and group/other-readable files are rejected. Before writing, the CLI revalidates every parent component, opens with `O_NOFOLLOW`, verifies the opened regular file's device/inode and mode against the final real path, rechecks the components, and writes only through that verified file descriptor.
+The workbench is decision support only. It may read and normalize holdings,
+evaluate policy, and write a private `DecisionRecordV2[]`; it must not submit,
+schedule, amend, cancel, or simulate a broker order as if it had executed. Any
+future execution requires a separate, explicit, human-authorized system at the
+`Execution Boundary`. If `--ledger` is used, the target must be an external
+owner-only regular file; a new ledger is created as `0600`. Symlinked
+targets/parents, repository paths, devices, and group/other-readable files are
+rejected. The ledger may not alias the cases inode, even under a different hard
+link path; this is rejected before provider/public I/O and evaluation. Before
+writing, the CLI revalidates every parent component and both bound file
+identities, opens with `O_NOFOLLOW`, verifies the opened regular file's
+device/inode and mode against the final real path and cases identity, rechecks
+the components, and writes only through that verified file descriptor.
 
 ## Migration order and deletion list
 
@@ -505,13 +532,13 @@ Migration is a clean cutover to the target contracts; no compatibility layer, al
 2. Replace the public producer with `MarketDataSnapshot` and `FundamentalResearch`, remove timing from the fundamental catalog, and make the quality manifest the required research gate.
 3. Introduce private structured underwriting and evidence-backed valuation/entry/invalidation, followed by the downstream `TimingAssessment`.
 4. Replace position math with the NLV-denominated `PortfolioCapacitySnapshot`;
-   accept only the exact normalized `RobinhoodReadV2` collector bundle on stdin,
+   accept only the exact normalized `RobinhoodReadV3` collector bundle on stdin,
    keep capacity policy in the private case, and do not add an account-provider
    client or MCP authentication to Node.
-5. Deepen that same V2 collector and projector with target quotes and earnings;
-   remove Yahoo current-price authority, caller timing claims, V1, and the
-   redundant `--robinhood` argument rather than adding another market adapter.
-6. Replace decision output with `DecisionRecordV2` and private-ledger persistence, then remove the old decision field names and ungrounded status paths.
+5. Deepen that collector with a sorted target set, per-call observation times,
+   target-isolated quote/earnings facts, and a single shared portfolio snapshot.
+6. Replace the single-symbol CLI with `evaluateCandidateBatch`, external verified
+   cases input, sorted `DecisionRecordV2[]`, and exact array-line ledger append.
 
 The following old mechanisms are deleted as each step lands:
 
