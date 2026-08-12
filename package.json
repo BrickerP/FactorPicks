@@ -1,9 +1,12 @@
 {
   "name": "factor-picks",
-  "description": "FactorPicks - local read-only DecisionRecordV2 decision workbench",
+  "description": "FactorPicks - progressive public research and private decision workbench",
   "version": "2.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

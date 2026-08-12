@@ -1,19 +1,26 @@
 # FactorPicks
 
-FactorPicks is a private opening-and-adding decision workbench for long-horizon
-US-stock candidates. Its headless pipeline combines public research, structured
-underwriting, read-only Robinhood market/portfolio facts, timing, and portfolio
-capacity into a canonical `DecisionRecordV2[]`. The static site reviews that
-derived batch without recomputing a decision or exposing the private inputs.
+FactorPicks is a progressive opening-and-adding decision workbench for
+long-horizon US-stock candidates. The static site first loads published public
+research into one stable, unranked symbol queue. A local private
+`DecisionRecordV2[]` can then enrich that same queue without exposing private
+inputs or recomputing a decision.
 
 **Live site:** https://brickerp.github.io/FactorPicks/
 
-## Decision workbench UI
+## Progressive decision workbench UI
 
-The site accepts one local JSON file containing a non-empty canonical
-`DecisionRecordV2[]`. Import is atomic: malformed records, duplicate symbols,
-unknown schemas, or unknown actions reject the complete replacement and leave
-the current in-memory session unchanged.
+On first load, the browser fetches published `stat.json` and
+`data-quality.json`. It shows their symbols in deterministic order with public
+quality and snapshot context, but no rank, adjustable weight, watchlist, MF
+output, risk score, action, or position recommendation.
+
+The site also accepts one local JSON file containing a non-empty canonical
+`DecisionRecordV2[]`. Import overlays matching private decisions onto the same
+queue and is atomic: malformed records, duplicate symbols, unknown schemas, or
+unknown actions reject the replacement and leave the current private session
+unchanged. The imported record is the sole authority for action, position,
+timing, blocker, and decision status.
 
 The UI displays the five supplied actions without deriving or upgrading them:
 
@@ -40,16 +47,20 @@ provided; it does not reconstruct them from private cases.
 
 - The browser reads the selected file with the File API and retains only the
   validated projection in React memory.
-- It does not upload the file, fetch decisions, persist them in local/session
+- It fetches only the published public research pair. It does not upload the
+  file, fetch private decisions, persist them in local/session
   storage or IndexedDB, encode them in a URL, log them, or place them in a public
   asset.
-- Replacing or clearing the import removes the current in-memory batch; a page
-  refresh always starts empty.
+- Replacing or clearing the import removes the private overlay while the public
+  queue remains available. A page refresh clears private records and reloads
+  public research.
+- A public research load failure is reported without disabling local private
+  import.
 - The UI is read-only and has no order, cancel, amend, broker-write, or simulated
   execution affordance.
-- Every displayed action, status, weight, range, code, and reference comes from
-  the imported record. Missing data remains unavailable rather than becoming
-  zero.
+- Every displayed action, decision status, weight, range, private code, and
+  private reference comes from the imported record. Missing private data remains
+  unavailable rather than becoming zero.
 
 ## Headless batch generation
 
@@ -126,8 +137,9 @@ implausible source values before publishing them. Examples include ROE outside
 the accepted range or inflated by negative equity, non-positive/extreme P/E,
 PEG outside the accepted range, and implausible FCFF/EV. The quality manifest
 binds the exact `stat.json` bytes by SHA-256, byte count, and symbol count. These
-artifacts are research inputs to the headless evaluator; the browser does not
-use them to recreate the retired ranking dashboard.
+artifacts feed both the headless evaluator and the browser's public-research
+projection. The browser exposes a stable candidate list and quality/snapshot
+context, not the retired ranking dashboard or a decision signal.
 
 Robinhood is the sole current-price authority for a decision. Yahoo `Close` and
 single-point analyst targets are not promoted to an actionable current price or
