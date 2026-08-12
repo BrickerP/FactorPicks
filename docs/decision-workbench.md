@@ -1,7 +1,8 @@
-# Headless Decision Workbench
+# FactorPicks Decision Workbench
 
-This document is the current non-UI contract for FactorPicks. The sole local
-entry point is:
+FactorPicks has one decision path with two boundaries: the headless CLI produces
+a canonical private `DecisionRecordV2[]`, and the static browser application
+imports that derived array locally for read-only review. The CLI entry point is:
 
 ```bash
 npm run workbench -- --cases /external/private/candidate-cases.json \
@@ -33,7 +34,8 @@ After the private inputs are structurally valid, the CLI makes exactly two
 public bodyless requests for the entire batch: one `GET <base>/stat.json` and one
 `GET <base>/data-quality.json`. The default base is
 `https://brickerp.github.io/FactorPicks/`. No private value enters a request.
-The path has no direct broker HTTP/auth, order, or public UI capability.
+The path has no direct broker HTTP/auth or order capability. Its derived output
+is the only input accepted by the browser decision UI.
 
 The CLI retains `stat.json` as the exact UTF-8 response text. It may parse that
 text only to validate its top-level JSON shape; it must not stringify the parsed
@@ -51,6 +53,7 @@ CandidateCasesV1 + public stat/quality + RobinhoodReadV3
   → canonicalize symbols, reject duplicates, validate exact V3 target set
   → evaluateSymbolCase once per sorted candidate
   → DecisionRecordV2[] sorted by symbol
+  → local in-memory decision UI or optional private ledger
 ```
 
 Each private case accepts exactly `schemaVersion`, `researchPolicy`,
@@ -116,6 +119,48 @@ The only five `BuyAction` values are:
 
 `Evaluation Blocked` is a decision status, not a sixth action: it returns `NO_ACTION` and blocker reasons because required inputs cannot be trusted. `Entry Prohibited` is a valid, evaluated state that normally yields `WATCH` for a non-holder or `NO_ACTION` plus `HoldingRisk` for a holder.
 
+## Browser decision UI
+
+The static application accepts one local file containing a non-empty canonical
+`DecisionRecordV2[]`. It validates and imports the batch atomically: malformed
+records, duplicate symbols, unknown schemas, and unknown actions reject the
+complete replacement while the prior in-memory session remains intact.
+
+The UI maps the five supplied actions to 观察 (`WATCH`), 试仓 (`PILOT`), 开仓
+(`OPEN`), 增持 (`ADD`), and 不操作 (`NO_ACTION`). It does not run
+`evaluateDecision`, infer an action, recalculate a price/range/weight, or promote
+a blocked result. `EVALUATION_BLOCKED` remains a separate prominent data status
+even though its canonical action is `NO_ACTION`.
+
+The candidate queue supports supplied-action/status filtering and deterministic
+sorting. The case memo shows the record's price, valuation and entry ranges,
+current/target/additional position weights, capacity, long-term and timing gates,
+reason and blocker codes, holding risk, invalidation state, evidence references,
+and content-addressed provenance. Missing fields render as unavailable, never as
+zero.
+
+`DecisionRecordV2` intentionally contains opaque evidence references and only an
+invalidation rule's ID, severity, state, and evidence IDs. It does not contain
+the private human-readable evidence claim or invalidation predicate/condition.
+The UI therefore states that those summaries were not supplied rather than
+reconstructing them from a private case.
+
+The browser privacy boundary is structural:
+
+- the File API reads the selected file and React retains only the validated
+  projection in memory;
+- imported content is not uploaded, fetched, logged, placed in a URL/public
+  asset, or persisted through local/session storage, IndexedDB, a service worker,
+  or another client cache;
+- replacing or clearing the import drops the current batch, and a page refresh
+  always returns to the empty import state;
+- the application has no order, cancel, amend, broker-write, or simulated
+  execution affordance.
+
+The retired factor-ranking table, adjustable factor controls, opaque risk score,
+and source-code watchlist are not alternate modes. Their frontend modules and
+tests are removed in the clean cutover.
+
 ## Target flow
 
 The final path is deliberately one-way and has no timing signal hidden inside fundamental research:
@@ -130,7 +175,7 @@ MarketDataSnapshot
   → PortfolioCapacity
   → DecisionPolicy + PositionSizing
   → DecisionRecord v2
-  → PrivateLedger
+  → local in-memory decision UI or PrivateLedger
 ```
 
 `MarketDataSnapshot` is the time-consistent observation of prices, identity, fundamentals, and source quality for a `Research Universe`. `FundamentalResearch` derives only long-horizon quality, growth, safety, and valuation observations; quarter performance, moving averages, and other near-term timing observations are not fundamental catalog factors. The `LongTermGate` answers whether the durable business case is eligible for private underwriting; it cannot be passed by timing data.
@@ -196,7 +241,8 @@ The canonical position denominator is `netLiquidationValue` (NLV), captured at t
 
 ## Core contract shapes
 
-These are compact domain shapes. They are intentionally independent of a UI, broker SDK, or a particular persistence technology.
+These are compact domain shapes. The decision engine remains independent of the
+browser projection, broker SDK, and persistence technology.
 
 ### Evidence
 
@@ -488,7 +534,7 @@ pair before a request. For one batch invocation, the CLI:
    ledger.
 
 The CLI does not refresh an account, place an order, call a broker, write public
-data, or mutate a UI. It never falls back to an official close, Yahoo price,
+data, or mutate the browser UI. It never falls back to an official close, Yahoo price,
 another symbol,
 an unqualified ranking, or an inferred personal policy. A late, partial, stale,
 or inconsistent semantic input is `Evaluation Blocked`.
@@ -524,33 +570,19 @@ identities, opens with `O_NOFOLLOW`, verifies the opened regular file's
 device/inode and mode against the final real path and cases identity, rechecks
 the components, and writes only through that verified file descriptor.
 
-## Migration order and deletion list
+## Implemented clean cutover
 
-Migration is a clean cutover to the target contracts; no compatibility layer, alias, fallback path, or dual-write is planned.
+The repository now uses the final one-way path. `evaluateCandidateBatch` accepts
+only the exact V3 target bundle and emits sorted `DecisionRecordV2[]`; the CLI
+accepts only the verified external batch cases file and optional private ledger;
+and the browser accepts only the canonical v2 record array through local import.
 
-1. Define and test the target domain contracts and invariants for snapshots, evidence, underwriting, valuation, invalidation, timing, capacity, policy, and `DecisionRecordV2`.
-2. Replace the public producer with `MarketDataSnapshot` and `FundamentalResearch`, remove timing from the fundamental catalog, and make the quality manifest the required research gate.
-3. Introduce private structured underwriting and evidence-backed valuation/entry/invalidation, followed by the downstream `TimingAssessment`.
-4. Replace position math with the NLV-denominated `PortfolioCapacitySnapshot`;
-   accept only the exact normalized `RobinhoodReadV3` collector bundle on stdin,
-   keep capacity policy in the private case, and do not add an account-provider
-   client or MCP authentication to Node.
-5. Deepen that collector with a sorted target set, per-call observation times,
-   target-isolated quote/earnings facts, and a single shared portfolio snapshot.
-6. Replace the single-symbol CLI with `evaluateCandidateBatch`, external verified
-   cases input, sorted `DecisionRecordV2[]`, and exact array-line ledger append.
-
-The following old mechanisms are deleted as each step lands:
-
-- `queryStocks` and the old ranking path in `src/lib/queryStocks.js`.
-- The direct `queryStocks` and `MFDataTemplate` consumption in `src/App.jsx`; the application must consume the target research/decision boundary instead.
-- `mf`/`MFDataTemplate` in `src/lib/mf.js` and the associated multi-factor compatibility path.
-- `computeRiskScores`; risk is represented by structured underwriting, invalidation, timing, and capacity instead of a second opaque score.
-- Timing entries in the fundamental catalog, including near-term performance and moving-average factors.
-- Any direct `PASS`/`FAIL` emission that has no evidence references and no blocker outcome for unknown data.
-- The `recommendedPosition` field; v2 uses `targetPosition`, with `additionalCapacity` carrying the amount that may be added.
-- Yahoo's single-point target price as an authoritative valuation; source observations may remain evidence, but the decision requires an evidence-backed range.
-- Yahoo `Close` as current-price authority, caller-authored timing pass/event
-  claims, `RobinhoodReadV1`, and the `--robinhood` compatibility flag.
-
-No compatibility layer is added for these deletions. Consumers migrate to the final names and boundaries in order, and stale paths are removed rather than retained behind aliases.
+The former ranking dashboard, `queryStocks`, `MFDataTemplate`, adjustable factor
+weights, source-code watchlist, opaque frontend risk score, single-symbol CLI,
+Robinhood V1/V2 inputs, Yahoo-close timing fallback, caller-authored timing
+status, and `recommendedPosition` alias are not compatibility paths. Structured
+underwriting, invalidation, timing, and NLV capacity are their sole decision
+replacements. The public Python producer still owns `stat.json`,
+`data-quality.json`, and its sector/industry mapping source; those research
+artifacts remain inputs to headless evaluation rather than a browser ranking
+mechanism.

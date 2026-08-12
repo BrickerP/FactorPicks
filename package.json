@@ -1,6 +1,6 @@
 {
   "name": "factor-picks",
-  "description": "FactorPicks - minimal US stock factor ranking dashboard",
+  "description": "FactorPicks - local read-only DecisionRecordV2 decision workbench",
   "version": "2.0.0",
   "private": true,
   "type": "module",
@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "react-test-renderer": "18.3.1",
     "vite": "^5.4.11"
   }
 }
