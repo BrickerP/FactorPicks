@@ -3,8 +3,8 @@
 ## Source of truth
 
 - Status: Active
-- Last refreshed: 2026-08-12
-- Primary product surfaces: the static FactorPicks Decision Workbench and its local DecisionRecordV2 import flow.
+- Last refreshed: 2026-08-13
+- Primary product surface: one progressive Decision Workbench queue, populated first from public research and then enriched by an optional local `DecisionRecordV2[]` import.
 - Evidence reviewed: `CONTEXT.md`, `docs/decision-workbench.md`, `src/App.jsx`, `src/App.css`, `src/domain/evaluateDecision.js`, `src/domain/portfolioCapacity.js`, `src/domain/evaluateCandidateBatch.js`, `package.json`.
 
 ## Brand
@@ -15,20 +15,20 @@
 
 ## Product goals
 
-- Goals: let one investor review a candidate in under five minutes and understand the supplied conclusion, price range, position capacity, timing, blockers, and invalidation-rule state.
-- Non-goals: ranking stocks, recomputing decisions, ingesting private cases or Robinhood payloads, persisting sessions, placing/cancelling orders, or becoming a portfolio tracker.
-- Success signals: a canonical batch imports atomically; all five actions are easy to scan; blocked records remain prominent; the user can inspect the full decision spine without leaving the page.
+- Goals: show a useful, stable symbol queue from public research on first load, then let one investor overlay private decisions and review the supplied conclusion, price range, position capacity, timing, blockers, and invalidation-rule state.
+- Non-goals: ranking or scoring stocks, recomputing decisions, ingesting private cases or raw Robinhood payloads, persisting private sessions, placing/cancelling orders, or becoming a portfolio tracker.
+- Success signals: public research loads without requiring a file; a canonical private batch imports atomically into the same queue; all five actions and blocked records remain easy to inspect.
 
 ## Personas and jobs
 
 - Primary personas: the repository owner making long-horizon fundamental entries/additions with occasional short-term opportunities inside the same approved universe.
-- User jobs: triage the batch, choose the next case, review the decision mandate, identify missing/failed gates, and retain a human final decision outside the application.
-- Key contexts of use: desktop deep review and mobile/tablet read-only reference; the source file is produced locally by the headless workbench.
+- User jobs: scan the public candidate queue, inspect its quality/snapshot context, import private decisions when available, choose the next case, review the mandate, and identify missing or failed gates.
+- Key contexts of use: desktop deep review and mobile/tablet read-only reference; public research is published by the repository pipeline, while private records are produced locally by the headless workbench.
 
 ## Information architecture
 
-- Primary navigation: one page; import/session controls, action/status filters, candidate queue, and case memo.
-- Core routes/screens: no router. Empty/import state and populated master-detail state share the same route.
+- Primary navigation: one page and one queue; public research status, private import/session controls, filters, candidates, and case memo progressively share the same surface.
+- Core routes/screens: no router. Public loading/error/ready and private unimported/imported states share the same master-detail route.
 - Content hierarchy: verdict -> price mandate -> position mandate -> decision spine -> invalidation rules -> evidence and provenance.
 - Default priority: holding-risk reviews, then OPEN/ADD/PILOT, WATCH, and NO_ACTION. `EVALUATION_BLOCKED` remains a separate visible status, not a sixth action.
 
@@ -36,8 +36,8 @@
 
 - The record is authoritative: the UI maps `buyAction` and supplied statuses; it never infers or upgrades an action.
 - Missing is not zero: absent numeric or textual fields render as an em dash or an explicit unavailable note.
-- Privacy is architectural: File API input stays in React memory. No upload, fetch of decisions, local/session storage, IndexedDB, service worker, URL encoding, analytics, or console logging.
-- One clean path: the ranking dashboard, factor controls, watchlist, and their frontend modules are removed rather than preserved as another mode.
+- Privacy is architectural: the browser fetches only published `stat.json` and `data-quality.json`; File API decision input stays in React memory. No private upload, decision fetch, persistence, URL encoding, analytics, or logging.
+- One clean path: public candidates and private decision overlays share one queue. The ranking dashboard, weights, watchlist, MF path, and frontend risk score remain removed.
 - Tradeoff: DecisionRecordV2 contains opaque evidence references and invalidation state but no human-readable evidence claim or rule condition. The UI must disclose that limitation rather than reconstruct private inputs.
 
 ## Visual language
@@ -52,8 +52,8 @@
 ## Components
 
 - Existing components to reuse: only React root mounting. The old ranking App is not a reusable decision component.
-- New/changed components: local import panel, session summary, filter/search controls, action counters, candidate table/cards, case memo, status badge, metric block, decision spine, invalidation list, provenance disclosure.
-- Variants and states: action values WATCH/PILOT/OPEN/ADD/NO_ACTION; VALID/BLOCKED; holding risk; loading/import error/empty/filter-empty/selected.
+- New/changed components: public research status, local import panel, private session summary, filters, candidate table/cards, case memo, decision status, metric block, decision spine, invalidation list, and provenance disclosure.
+- Variants and states: public loading/error/ready; private unimported/importing/error/imported; action values WATCH/PILOT/OPEN/ADD/NO_ACTION; VALID/BLOCKED; holding risk; filter-empty/selected.
 - Token/component ownership: CSS custom properties and semantic classes in `src/App.css`; record parsing/mapping/sorting/filtering in one pure UI module.
 
 ## Accessibility
@@ -72,12 +72,12 @@
 
 ## Interaction states
 
-- Loading: local parse progress is announced; there is no network loading state.
-- Empty: import invitation, format/privacy explanation, and no sample securities.
-- Error: reject the entire incoming batch; retain the previous in-memory session and announce that the new file was not loaded.
-- Success: show file name, record count, time span, and replacement/clear controls.
+- Loading: public research loading and local import parsing are announced independently.
+- Empty: an unimported private state is not an empty application; a valid public artifact with no symbols gets its own explanation.
+- Error: public load failure leaves private import available. Invalid private batches are rejected atomically while the previous in-memory overlay remains intact.
+- Success: show the public symbol count and bound quality/snapshot context; after private import, also show file name, record count, time span, and replacement/clear controls.
 - Disabled: blocked records remain reviewable but receive no executable action affordance.
-- Offline/slow network: the decision UI itself works offline after the static bundle loads; it does not fetch decision or market data.
+- Offline/slow network: public research may fail without disabling private import. The browser never fetches private decisions or live broker/account data.
 
 ## Content voice
 
@@ -89,17 +89,20 @@
 
 - Framework/styling system: existing React 18 + Vite 5 + plain CSS; no new UI framework or dependency for this slice.
 - Design-token constraints: extend the repo with semantic CSS variables, not a parallel component system.
-- Performance constraints: parse once, retain only the validated projection, and keep filtering/sorting client-side without extra requests.
-- Compatibility constraints: GitHub Pages relative base; input is a JSON array of canonical schemaVersion 2 records. No legacy ranking or alternate input format.
-- Test/screenshot expectations: pure Node tests cover atomic validation, mapping, sorting/filtering, privacy projection, and missing-value behavior; remote CI is build authority. Browser QA must cover empty/import/populated/error states at 360/768/1280.
+- Performance constraints: fetch each public artifact once per page load, parse private input once, retain only its validated projection, and filter/sort client-side.
+- Compatibility constraints: GitHub Pages relative base; public input is the published research pair and private input is canonical schemaVersion 2 records. No legacy ranking or alternate private format.
+- Test/screenshot expectations: pure Node tests cover public projection, atomic private validation, overlay mapping, sorting/filtering, privacy projection, and missing-value behavior; remote CI is build authority. Browser QA must cover public loading/ready/error and private unimported/imported/error states at 360/768/1280.
 
 ## Acceptance criteria
 
 - All five supplied actions display without UI-side decision logic.
+- First load shows a stable, unranked public symbol queue with quality and snapshot context.
+- Public candidates and private decisions occupy one queue; private records alone authorize actions, positions, timing, and decision status.
 - A malformed, empty, duplicate-symbol, unknown-schema, or unknown-action batch is rejected atomically.
 - Blocked records cannot be visually collapsed into ordinary NO_ACTION.
 - Price/position missing values never become zero.
-- No imported file content enters network requests, persistence, URL state, public assets, or logs; reload clears the session.
+- A public load failure does not disable private import.
+- No imported file content enters network requests, persistence, URL state, public assets, or logs; reload clears the private overlay and reloads public research.
 - The old queryStocks/MFDataTemplate/WATCHLIST UI path is deleted.
 - There is no order or broker-write affordance.
 

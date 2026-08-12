@@ -1,8 +1,10 @@
 # FactorPicks Decision Workbench
 
-FactorPicks has one decision path with two boundaries: the headless CLI produces
-a canonical private `DecisionRecordV2[]`, and the static browser application
-imports that derived array locally for read-only review. The CLI entry point is:
+FactorPicks has one progressive browser queue with two data boundaries. The
+browser first projects published public research into stable, unranked symbol
+candidates. The headless CLI separately produces a canonical private
+`DecisionRecordV2[]`, which the browser can import locally to enrich that same
+queue for read-only review. The CLI entry point is:
 
 ```bash
 npm run workbench -- --cases /external/private/candidate-cases.json \
@@ -35,7 +37,8 @@ public bodyless requests for the entire batch: one `GET <base>/stat.json` and on
 `GET <base>/data-quality.json`. The default base is
 `https://brickerp.github.io/FactorPicks/`. No private value enters a request.
 The path has no direct broker HTTP/auth or order capability. Its derived output
-is the only input accepted by the browser decision UI.
+is the only accepted source of private decision fields in the browser UI;
+published research supplies only candidate, quality, and snapshot context.
 
 The CLI retains `stat.json` as the exact UTF-8 response text. It may parse that
 text only to validate its top-level JSON shape; it must not stringify the parsed
@@ -121,10 +124,18 @@ The only five `BuyAction` values are:
 
 ## Browser decision UI
 
-The static application accepts one local file containing a non-empty canonical
-`DecisionRecordV2[]`. It validates and imports the batch atomically: malformed
-records, duplicate symbols, unknown schemas, and unknown actions reject the
-complete replacement while the prior in-memory session remains intact.
+The static application has one progressive candidate queue. On first load it
+fetches published `stat.json` and `data-quality.json` and projects a stable,
+unranked symbol list with public quality and snapshot context. This does not
+restore `queryStocks`, `MFDataTemplate`, adjustable factor weights, a source-code
+watchlist, or an opaque frontend risk score, and it derives no action or position.
+
+The application also accepts one local file containing a non-empty canonical
+`DecisionRecordV2[]`. It validates and overlays the batch atomically onto that
+same queue: malformed records, duplicate symbols, unknown schemas, and unknown
+actions reject the replacement while the prior private session remains intact.
+An imported record is the sole authority for action, position sizing, timing,
+blockers, holding risk, and decision status.
 
 The UI maps the five supplied actions to 观察 (`WATCH`), 试仓 (`PILOT`), 开仓
 (`OPEN`), 增持 (`ADD`), and 不操作 (`NO_ACTION`). It does not run
@@ -149,17 +160,21 @@ The browser privacy boundary is structural:
 
 - the File API reads the selected file and React retains only the validated
   projection in memory;
-- imported content is not uploaded, fetched, logged, placed in a URL/public
+- the browser fetches only the published public research pair; imported content
+  is not uploaded, fetched, logged, placed in a URL/public
   asset, or persisted through local/session storage, IndexedDB, a service worker,
   or another client cache;
-- replacing or clearing the import drops the current batch, and a page refresh
-  always returns to the empty import state;
+- replacing or clearing the import drops the private overlay without removing
+  the public queue; a page refresh clears private records and reloads public
+  research;
+- a public research load failure does not disable local private import;
 - the application has no order, cancel, amend, broker-write, or simulated
   execution affordance.
 
 The retired factor-ranking table, adjustable factor controls, opaque risk score,
 and source-code watchlist are not alternate modes. Their frontend modules and
-tests are removed in the clean cutover.
+tests remain removed; the public projection is a research queue, not a ranking
+or decision mechanism.
 
 ## Target flow
 
@@ -175,7 +190,7 @@ MarketDataSnapshot
   → PortfolioCapacity
   → DecisionPolicy + PositionSizing
   → DecisionRecord v2
-  → local in-memory decision UI or PrivateLedger
+  → private overlay on the progressive in-memory queue or PrivateLedger
 ```
 
 `MarketDataSnapshot` is the time-consistent observation of prices, identity, fundamentals, and source quality for a `Research Universe`. `FundamentalResearch` derives only long-horizon quality, growth, safety, and valuation observations; quarter performance, moving averages, and other near-term timing observations are not fundamental catalog factors. The `LongTermGate` answers whether the durable business case is eligible for private underwriting; it cannot be passed by timing data.
@@ -572,10 +587,12 @@ the components, and writes only through that verified file descriptor.
 
 ## Implemented clean cutover
 
-The repository now uses the final one-way path. `evaluateCandidateBatch` accepts
-only the exact V3 target bundle and emits sorted `DecisionRecordV2[]`; the CLI
-accepts only the verified external batch cases file and optional private ledger;
-and the browser accepts only the canonical v2 record array through local import.
+The repository now uses one progressive queue and one private decision path.
+`evaluateCandidateBatch` accepts only the exact V3 target bundle and emits
+sorted `DecisionRecordV2[]`; the CLI accepts only the verified external batch
+cases file and optional private ledger; and the browser accepts only the
+canonical v2 record array for its private overlay. Its separate public projection
+reads the published research pair and has no decision authority.
 
 The former ranking dashboard, `queryStocks`, `MFDataTemplate`, adjustable factor
 weights, source-code watchlist, opaque frontend risk score, single-symbol CLI,
@@ -584,5 +601,5 @@ status, and `recommendedPosition` alias are not compatibility paths. Structured
 underwriting, invalidation, timing, and NLV capacity are their sole decision
 replacements. The public Python producer still owns `stat.json`,
 `data-quality.json`, and its sector/industry mapping source; those research
-artifacts remain inputs to headless evaluation rather than a browser ranking
-mechanism.
+artifacts feed the headless evaluator and the browser's unranked public candidate
+projection, never an action, position, or browser ranking mechanism.

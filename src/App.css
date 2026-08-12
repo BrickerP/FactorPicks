@@ -172,6 +172,7 @@ main {
 }
 
 .import-panel,
+.public-status,
 .session-strip,
 .triage-panel,
 .candidate-queue,
@@ -188,6 +189,38 @@ main {
   gap: 16px 32px;
   align-items: center;
   padding: 20px 24px;
+}
+
+.public-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 24px;
+  border-left: 4px solid var(--watch);
+}
+
+.public-status h2 {
+  margin-top: 5px;
+  font-size: clamp(1.25rem, 2vw, 1.8rem);
+}
+
+.public-status p:last-child {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.public-status > strong {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.public-status--error {
+  border-left-color: var(--blocked);
+  background: var(--blocked-soft);
 }
 
 .import-copy h2,
@@ -222,15 +255,16 @@ main {
   justify-content: center;
   min-height: 44px;
   padding: 10px 16px;
-  border: 1px solid var(--ink);
-  background: var(--ink);
-  color: var(--panel);
+  border: 1px solid var(--rule-strong);
+  background: transparent;
+  color: var(--ink);
   cursor: pointer;
-  font-weight: 750;
+  font-weight: 400;
 }
 
 .file-control:hover {
-  background: #293331;
+  border-color: var(--ink);
+  background: var(--panel-deep);
 }
 
 .file-control.is-reading {
@@ -562,6 +596,24 @@ main {
 .badge--blocked { color: var(--blocked); }
 .badge--action-no-action,
 .badge--neutral { color: var(--muted); }
+
+.pending-decision {
+  display: inline-flex;
+  min-height: 23px;
+  align-items: center;
+  padding: 3px 6px;
+  border: 1px dashed var(--rule-strong);
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 750;
+}
+
+.public-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
 
 .numeric {
   white-space: nowrap;
@@ -950,6 +1002,12 @@ main {
     padding: 18px;
   }
 
+  .public-status {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 18px;
+  }
+
   .import-actions {
     align-items: stretch;
     flex-direction: column;
@@ -1033,6 +1091,7 @@ main {
   .memo-verdict,
   .metric-grid,
   .metric-grid--three,
+  .public-facts,
   .verdict-meta,
   .code-columns {
     grid-template-columns: 1fr;

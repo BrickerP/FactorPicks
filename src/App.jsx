@@ -3,6 +3,10 @@ import {
   filterDecisionRecords,
   parseDecisionRecordBatch,
 } from './ui/decisionRecords.js'
+import {
+  mergePublicCandidatesWithDecisions,
+  parsePublicCandidateSession,
+} from './ui/publicCandidates.js'
 
 const ACTIONS = [
   { code: 'WATCH', label: '观察' },
@@ -218,6 +222,9 @@ function SnapshotRef({ label, value }) {
 }
 
 function CandidateStatus({ record }) {
+  if (!record) {
+    return <span className="pending-decision">尚未形成私人决策</span>
+  }
   return (
     <div className="status-stack">
       <Badge tone={`action-${record.action.code.toLowerCase().replace('_', '-')}`}>
@@ -226,6 +233,39 @@ function CandidateStatus({ record }) {
       {record.blocked ? <Badge tone="blocked">评估阻断 · EVALUATION_BLOCKED</Badge> : null}
       {record.holdingRisk !== 'NONE' ? <Badge tone="risk">{statusLabel(record.holdingRisk)}</Badge> : null}
     </div>
+  )
+}
+
+function PublicFacts({ candidate }) {
+  if (!candidate) return <p className="unavailable">该代码仅存在于私人决策批次，未匹配本次公开研究。</p>
+  return (
+    <dl className="public-facts">
+      <Metric label="公开收盘价" value={formatMoney(candidate.close, candidate.currency)} note={`as of ${formatDate(candidate.asOf)}`} />
+      <Metric label="公司" value={candidate.name} />
+      <Metric label="市值" value={formatMoney(candidate.fundamentals.marketCap, candidate.currency)} />
+      <Metric label="市盈率" value={candidate.fundamentals.priceToEarnings} />
+      <Metric label="PEG" value={candidate.fundamentals.peg} />
+      <Metric label="ROE" value={formatWeight(candidate.fundamentals.returnOnEquity)} />
+    </dl>
+  )
+}
+
+function PublicMemo({ item, onClose, panelRef }) {
+  return (
+    <aside id="case-memo" className="case-memo" aria-labelledby="case-title" tabIndex="-1" ref={panelRef}>
+      <div className="memo-header">
+        <div>
+          <p className="eyebrow">公开研究候选 · Public facts</p>
+          <h2 id="case-title">{item.symbol}</h2>
+          <p className="memo-time">尚未形成私人决策</p>
+        </div>
+        <button className="text-button memo-close" type="button" onClick={onClose} aria-label={`关闭 ${item.symbol} 详情`}>关闭</button>
+      </div>
+      <section className="memo-section">
+        <p className="disclosure">这里只展示已发布的市场与基本面事实，不提供评分、排名、动作、仓位或时机结论。</p>
+        <PublicFacts candidate={item.publicCandidate} />
+      </section>
+    </aside>
   )
 }
 
@@ -397,7 +437,7 @@ function DetailMemo({ record, onClose, panelRef }) {
   )
 }
 
-function CandidateTable({ records, selectedSymbol, onSelect }) {
+function CandidateTable({ items, selectedSymbol, onSelect }) {
   return (
     <div className="table-shell">
       <table className="candidate-table">
@@ -415,70 +455,79 @@ function CandidateTable({ records, selectedSymbol, onSelect }) {
           </tr>
         </thead>
         <tbody>
-          {records.map(record => (
-            <tr key={record.symbol} className={record.blocked ? 'is-blocked' : ''} aria-current={selectedSymbol === record.symbol ? 'true' : undefined}>
+          {items.map(item => {
+            const record = item.decisionRecord
+            const publicCandidate = item.publicCandidate
+            return (
+            <tr key={item.symbol} className={record?.blocked ? 'is-blocked' : ''} aria-current={selectedSymbol === item.symbol ? 'true' : undefined}>
               <td>
-                <strong className="symbol">{record.symbol}</strong>
-                {record.blocked ? <span className="blocked-line">评估阻断</span> : null}
-                {record.holdingRisk !== 'NONE' ? <span className="risk-line">{STATUS_LABELS[record.holdingRisk]}</span> : null}
+                <strong className="symbol">{item.symbol}</strong>
+                {record?.blocked ? <span className="blocked-line">评估阻断</span> : null}
+                {record && record.holdingRisk !== 'NONE' ? <span className="risk-line">{STATUS_LABELS[record.holdingRisk]}</span> : null}
               </td>
               <td><CandidateStatus record={record} /></td>
-              <td className="numeric">{formatMoney(record.evaluatedPrice?.value, record.evaluatedPrice?.currency)}</td>
-              <td className="numeric">{formatRange(record.underwriting?.entryRange, ['lower', 'upper'])}</td>
-              <td className="numeric">{formatWeight(record.capacitySummary?.currentPosition?.weight)} → {formatWeight(record.positionSizing?.targetPosition)}</td>
-              <td>{statusLabel(record.timingAssessment?.status)}</td>
-              <td className="reason-cell">{codeLabel(record.reasonCodes[0] ?? record.blockerCodes[0])}</td>
+              <td className="numeric">{record ? formatMoney(record.evaluatedPrice?.value, record.evaluatedPrice?.currency) : formatMoney(publicCandidate?.close, publicCandidate?.currency)}</td>
+              <td className="numeric">{record ? formatRange(record.underwriting?.entryRange, ['lower', 'upper']) : '—'}</td>
+              <td className="numeric">{record ? `${formatWeight(record.capacitySummary?.currentPosition?.weight)} → ${formatWeight(record.positionSizing?.targetPosition)}` : '—'}</td>
+              <td>{record ? statusLabel(record.timingAssessment?.status) : '—'}</td>
+              <td className="reason-cell">{record ? codeLabel(record.reasonCodes[0] ?? record.blockerCodes[0]) : '公开事实，待私人评估'}</td>
               <td>
                 <button
                   type="button"
                   className="detail-button"
-                  aria-expanded={selectedSymbol === record.symbol}
+                  aria-expanded={selectedSymbol === item.symbol}
                   aria-controls="case-memo"
-                  onClick={event => onSelect(record.symbol, event.currentTarget)}
+                  onClick={event => onSelect(item.symbol, event.currentTarget)}
                 >
                   详情
                 </button>
               </td>
-            </tr>
-          ))}
+            </tr>)
+          })}
         </tbody>
       </table>
     </div>
   )
 }
 
-function CandidateCards({ records, selectedSymbol, onSelect }) {
+function CandidateCards({ items, selectedSymbol, onSelect }) {
   return (
     <ul className="candidate-cards" aria-label="候选股决策队列">
-      {records.map(record => (
-        <li key={record.symbol} className={record.blocked ? 'is-blocked' : ''}>
+      {items.map(item => {
+        const record = item.decisionRecord
+        const publicCandidate = item.publicCandidate
+        return (
+        <li key={item.symbol} className={record?.blocked ? 'is-blocked' : ''}>
           <div className="card-head">
-            <strong className="symbol">{record.symbol}</strong>
+            <strong className="symbol">{item.symbol}</strong>
             <CandidateStatus record={record} />
           </div>
           <dl className="card-metrics">
-            <Metric label="当前价" value={formatMoney(record.evaluatedPrice?.value, record.evaluatedPrice?.currency)} />
-            <Metric label="入场区间" value={formatRange(record.underwriting?.entryRange, ['lower', 'upper'])} />
-            <Metric label="当前 → 目标" value={`${formatWeight(record.capacitySummary?.currentPosition?.weight)} → ${formatWeight(record.positionSizing?.targetPosition)}`} />
-            <Metric label="时机" value={statusLabel(record.timingAssessment?.status)} />
-            <Metric label="首要原因" value={codeLabel(record.reasonCodes[0] ?? record.blockerCodes[0])} />
+            <Metric label={record ? '当前价' : '公开收盘价'} value={record ? formatMoney(record.evaluatedPrice?.value, record.evaluatedPrice?.currency) : formatMoney(publicCandidate?.close, publicCandidate?.currency)} />
+            <Metric label="入场区间" value={record ? formatRange(record.underwriting?.entryRange, ['lower', 'upper']) : '—'} />
+            <Metric label="当前 → 目标" value={record ? `${formatWeight(record.capacitySummary?.currentPosition?.weight)} → ${formatWeight(record.positionSizing?.targetPosition)}` : '—'} />
+            <Metric label="时机" value={record ? statusLabel(record.timingAssessment?.status) : '—'} />
+            <Metric label="首要原因" value={record ? codeLabel(record.reasonCodes[0] ?? record.blockerCodes[0]) : '公开事实，待私人评估'} />
           </dl>
           <button
             type="button"
             className="detail-button detail-button--full"
-            aria-expanded={selectedSymbol === record.symbol}
+            aria-expanded={selectedSymbol === item.symbol}
             aria-controls="case-memo"
-            onClick={event => onSelect(record.symbol, event.currentTarget)}
+            onClick={event => onSelect(item.symbol, event.currentTarget)}
           >
-            查看 {record.symbol} 详情
+            查看 {item.symbol} 详情
           </button>
-        </li>
-      ))}
+        </li>)
+      })}
     </ul>
   )
 }
 
 function App() {
+  const [publicSession, setPublicSession] = useState(null)
+  const [publicState, setPublicState] = useState('loading')
+  const [publicError, setPublicError] = useState('')
   const [session, setSession] = useState(null)
   const [query, setQuery] = useState('')
   const [actionFilters, setActionFilters] = useState([])
@@ -494,6 +543,34 @@ function App() {
   const focusDetailRef = useRef(false)
   const importGenerationRef = useRef(0)
 
+  useEffect(() => {
+    let active = true
+    const load = async () => {
+      try {
+        const [statResponse, qualityResponse] = await Promise.all([
+          fetch('./stat.json'),
+          fetch('./data-quality.json'),
+        ])
+        if (!statResponse.ok || !qualityResponse.ok) throw new Error('public response failed')
+        const next = await parsePublicCandidateSession(
+          await statResponse.text(),
+          await qualityResponse.json(),
+        )
+        if (!active) return
+        setPublicSession(next)
+        setPublicState('ready')
+        setAnnouncement(`已加载 ${next.candidates.length} 个公开研究候选。`)
+      } catch {
+        if (!active) return
+        setPublicState('error')
+        setPublicError('公开研究加载失败；仍可导入本机私人决策批次。')
+        setAnnouncement('公开研究加载失败；私人导入仍可使用。')
+      }
+    }
+    load()
+    return () => { active = false }
+  }, [])
+
   const filteredRecords = useMemo(() => {
     if (!session) return []
     return filterDecisionRecords(session.records, {
@@ -505,17 +582,38 @@ function App() {
     })
   }, [session, query, actionFilters, dataStatus, timingStatus, holdingRisk])
 
-  const selectedRecord = filteredRecords.find(record => record.symbol === selectedSymbol) ?? null
+  const queueItems = useMemo(() => {
+    const decisionRecords = session?.records ?? []
+    if (!publicSession) {
+      return filteredRecords.map(decisionRecord => ({
+        symbol: decisionRecord.symbol,
+        publicCandidate: null,
+        decisionRecord,
+      }))
+    }
+    const filteredDecisionSymbols = new Set(filteredRecords.map(record => record.symbol))
+    const hasDecisionFilters = actionFilters.length || dataStatus || timingStatus || holdingRisk
+    const normalizedQuery = query.trim().toUpperCase()
+    const merged = mergePublicCandidatesWithDecisions(publicSession, decisionRecords)
+    return merged.filter(item =>
+      (!normalizedQuery || item.symbol.includes(normalizedQuery)) &&
+      (!hasDecisionFilters || (item.decisionRecord && filteredDecisionSymbols.has(item.symbol))),
+    )
+  }, [publicSession, session, filteredRecords, query, actionFilters, dataStatus, timingStatus, holdingRisk])
+
+  const selectedItem = queueItems.find(item => item.symbol === selectedSymbol) ?? null
+  const selectedRecord = selectedItem?.decisionRecord ?? null
+  const selectedSessionRecord = session?.records.find(record => record.symbol === selectedSymbol) ?? null
 
   useEffect(() => {
-    if (selectedRecord && focusDetailRef.current) {
+    if (selectedItem && focusDetailRef.current) {
       focusDetailRef.current = false
       panelRef.current?.focus()
     }
-  }, [selectedRecord])
+  }, [selectedItem])
 
   useEffect(() => {
-    if (!selectedRecord) return undefined
+    if (!selectedItem) return undefined
     const onKeyDown = event => {
       if (event.key === 'Escape') {
         setSelectedSymbol(null)
@@ -528,10 +626,10 @@ function App() {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [selectedRecord])
+  }, [selectedItem])
 
   useEffect(() => {
-    if (!selectedSymbol || !session || selectedRecord) return
+    if (!selectedSymbol || (selectedItem && (!selectedSessionRecord || selectedRecord))) return
     setSelectedSymbol(null)
     focusDetailRef.current = false
     const target = returnFocusRef.current
@@ -539,7 +637,7 @@ function App() {
     requestAnimationFrame(() => {
       if (target?.isConnected) target.focus()
     })
-  }, [selectedRecord, selectedSymbol, session])
+  }, [selectedItem, selectedRecord, selectedSessionRecord, selectedSymbol])
 
   useEffect(() => {
     if (!session) return
@@ -624,22 +722,34 @@ function App() {
       <header className="masthead">
         <div>
           <p className="eyebrow">FactorPicks · Decision Workbench</p>
-          <h1>开仓与增持决策台</h1>
-          <p className="lede">在五分钟内审阅已生成的结论、价格边界、仓位上限与判断失效状态。</p>
+          <h1>研究候选与私人决策台</h1>
+          <p className="lede">先浏览公开研究候选；只有导入私人 DecisionRecordV2 后，才审阅结论、价格边界与仓位等私人决策信息。</p>
         </div>
         <ul className="trust-list" aria-label="工作台边界">
-          <li>只在本机内存</li>
+          <li>公开研究自动加载</li>
+          <li>私人决策只在本机内存</li>
           <li>只读审阅</li>
           <li>无下单能力</li>
         </ul>
       </header>
 
       <main>
+        <section className={`public-status public-status--${publicState}`} aria-live="polite">
+          <div>
+            <p className="section-index">PUBLIC / 01</p>
+            <h2>{publicState === 'loading' ? '正在加载公开研究' : publicState === 'error' ? '公开研究加载失败' : '公开研究候选'}</h2>
+            <p>{publicState === 'ready'
+              ? `已校验 ${publicSession.candidates.length} 个公开候选；按股票代码稳定排列，不提供评分或排名。`
+              : publicError || '正在读取同源 stat.json 与 data-quality.json。'}</p>
+          </div>
+          {publicSession ? <strong>{formatDate(publicSession.quality.generatedAt)}</strong> : null}
+        </section>
+
         <section className="import-panel" aria-labelledby="import-title">
           <div className="import-copy">
-            <p className="section-index">LOCAL / 01</p>
-            <h2 id="import-title">导入决策批次</h2>
-            <p id="import-help">仅接受工作台生成的非空 <code>DecisionRecordV2[]</code> JSON。文件在本机读取一次，通过原子校验后只保留允许字段的内存投影；刷新页面即清空。</p>
+            <p className="section-index">PRIVATE / 02</p>
+            <h2 id="import-title">叠加私人决策（可选）</h2>
+            <p id="import-help">导入工作台生成的非空 <code>DecisionRecordV2[]</code> JSON，为同一候选队列叠加动作与审阅详情。文件仅在本机读取；刷新页面只清除此私人层。</p>
           </div>
           <div className="import-actions">
             <label className={`file-control${importState === 'reading' ? ' is-reading' : ''}`}>
@@ -661,9 +771,15 @@ function App() {
           {importError ? <p className="import-error" role="alert">{importError}</p> : null}
         </section>
 
-        {session ? (
+        {publicState === 'loading' && !session ? (
+          <section className="empty-state" aria-labelledby="loading-title">
+            <p className="section-index">LOADING / 03</p>
+            <h2 id="loading-title">正在建立公开候选队列</h2>
+            <p>加载期间仍可选择本机决策批次；私人内容不会进入网络请求。</p>
+          </section>
+        ) : queueItems.length ? (
           <>
-            <section className="session-strip" aria-labelledby="session-title">
+            {session ? <section className="session-strip" aria-labelledby="session-title">
               <div>
                 <p className="eyebrow" id="session-title">当前内存会话</p>
                 <strong>{session.fileName ?? '未命名 JSON'}</strong>
@@ -673,9 +789,9 @@ function App() {
                 <Metric label="最早决策" value={formatDate(session.summary.decidedAt.earliest)} />
                 <Metric label="最晚决策" value={formatDate(session.summary.decidedAt.latest)} />
               </dl>
-            </section>
+            </section> : null}
 
-            <section className="triage-panel" aria-labelledby="triage-title">
+            {session ? <section className="triage-panel" aria-labelledby="triage-title">
               <div className="section-heading section-heading--major">
                 <p className="section-index">REVIEW / 02</p>
                 <h2 id="triage-title">候选分流</h2>
@@ -740,21 +856,21 @@ function App() {
                 </label>
                 <button className="text-button filter-reset" type="button" onClick={resetFilters}>清除筛选</button>
               </div>
-            </section>
+            </section> : null}
 
             <div className={`workbench-grid${selectedRecord ? '' : ' workbench-grid--queue-only'}`}>
               <section className="candidate-queue" aria-labelledby="queue-title">
                 <div className="queue-heading">
                   <div>
                     <p className="section-index">QUEUE / 03</p>
-                    <h2 id="queue-title">决策队列</h2>
+                    <h2 id="queue-title">候选队列</h2>
                   </div>
-                  <p><strong>{filteredRecords.length}</strong> / {session.summary.total} 条</p>
+                  <p><strong>{queueItems.length}</strong> 条 · 私人决策 {session?.summary.total ?? 0}</p>
                 </div>
-                {filteredRecords.length ? (
+                {queueItems.length ? (
                   <>
-                    <CandidateTable records={filteredRecords} selectedSymbol={selectedSymbol} onSelect={openDetails} />
-                    <CandidateCards records={filteredRecords} selectedSymbol={selectedSymbol} onSelect={openDetails} />
+                    <CandidateTable items={queueItems} selectedSymbol={selectedSymbol} onSelect={openDetails} />
+                    <CandidateCards items={queueItems} selectedSymbol={selectedSymbol} onSelect={openDetails} />
                   </>
                 ) : (
                   <div className="filter-empty">
@@ -763,7 +879,9 @@ function App() {
                   </div>
                 )}
               </section>
-              {selectedRecord ? <DetailMemo record={selectedRecord} onClose={closeDetails} panelRef={panelRef} /> : (
+              {selectedRecord ? <DetailMemo record={selectedRecord} onClose={closeDetails} panelRef={panelRef} /> : selectedItem ? (
+                <PublicMemo item={selectedItem} onClose={closeDetails} panelRef={panelRef} />
+              ) : (
                 <aside className="memo-placeholder" aria-label="决策详情未打开">
                   <p className="section-index">MEMO / 04</p>
                   <h2>投委会工作纸</h2>
@@ -774,9 +892,9 @@ function App() {
           </>
         ) : (
           <section className="empty-state" aria-labelledby="empty-title">
-            <p className="section-index">EMPTY / 02</p>
-            <h2 id="empty-title">等待一份可审阅的决策批次</h2>
-            <p>请先在本地无头工作台生成批量决策记录，再导入本页。本页不读取私有 case、Robinhood 原始响应或公开排名数据，也不重新计算动作。</p>
+            <p className="section-index">EMPTY / 03</p>
+            <h2 id="empty-title">当前没有可展示的候选</h2>
+            <p>公开研究未提供候选。你仍可导入本机 DecisionRecordV2 批次；本页不会上传私人 case 或 Robinhood 原始响应。</p>
             <div className="empty-contract">
               <span>输入</span><code>DecisionRecordV2[]</code>
               <span>会话</span><code>React memory only</code>
