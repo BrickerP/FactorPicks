@@ -26,3 +26,20 @@ jobs:
 
     - name: Vite build
       run: npm run build
+
+  fetch-stock-data-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out repo
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.12
+
+    - name: Install Python dependencies
+      run: python -m pip install -r ./.github/fetch_stock_data/requirements.txt
+
+    - name: Run fetch_stock_data unit tests
+      run: python -m unittest discover -s .github/fetch_stock_data -p "test_*.py"
