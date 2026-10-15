@@ -9,6 +9,7 @@ import time
 import requests
 import yfinance as yf
 import pandas as pd
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 DELAY_TIME_SEC = 0.5
@@ -126,6 +127,19 @@ def unix_timestamp_to_utc_iso(value):
         return datetime_to_utc_iso(datetime.fromtimestamp(timestamp, timezone.utc))
     except (TypeError, ValueError, OverflowError, OSError):
         return "-"
+
+
+def metadata_time_to_utc_iso(value):
+    """Convert a chart metadata time to a UTC ISO string.
+
+    Yahoo returns regularMarketTime as a unix timestamp, but yfinance >= 1.x
+    formats it into a timezone-aware datetime/pandas.Timestamp before handing
+    the metadata out."""
+    if value is None or isinstance(value, bool):
+        return "-"
+    if isinstance(value, (int, float)):
+        return unix_timestamp_to_utc_iso(value)
+    return datetime_to_utc_iso(value)
 
 
 def pct_decimal(v):
@@ -290,14 +304,17 @@ def get_stock_1y_data_from_yahoo(stock):
 
 
 def get_stock_quote_from_history_metadata(stock):
-    """Return one atomic USD quote from the ticker's cached chart metadata."""
+    """Return one atomic USD quote from the ticker's cached chart metadata.
+
+    yfinance >= 1.x returns a yfinance.scrapers.history.HistoryMetadata, which
+    is a collections.abc.Mapping but not a dict, so accept any Mapping."""
     try:
         metadata = stock.get_history_metadata()
-        if not isinstance(metadata, dict):
+        if not isinstance(metadata, Mapping):
             return None
 
         close = fmt_num(metadata.get("regularMarketPrice"))
-        as_of = unix_timestamp_to_utc_iso(metadata.get("regularMarketTime"))
+        as_of = metadata_time_to_utc_iso(metadata.get("regularMarketTime"))
         currency = clean_text(metadata.get("currency"))
         if close == "-" or as_of == "-" or currency != "USD":
             return None
